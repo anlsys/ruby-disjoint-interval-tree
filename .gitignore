@@ -1,0 +1,13 @@
+/tmp/
+/pkg/
+*.gem
+*.o
+*.so
+*.bundle
+Makefile
+mkmf.log
+
+# C test binaries
+/test/c/test_dit_debug
+/test/c/test_dit_asan
+/test/c/test_dit_release
