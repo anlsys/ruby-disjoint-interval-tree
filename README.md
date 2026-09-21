@@ -53,20 +53,34 @@ tree.to_a             # => []
   Breaking it raises `DisjointIntervalTree::OverlapError` and leaves the tree
   unchanged - intervals are never merged nor split implicitly.
 
-## Complexities
+## Operations
 
-With `n` intervals stored and `k` intervals reported:
+With `n` intervals stored, `k` intervals reported by the call, and `m`
+intervals handed to the constructor:
 
-| operation                | complexity     |
-| ------------------------ | -------------- |
-| `insert(a, b)`           | `O(log n)`     |
-| `intersect(a, b, &blk)` | `O(k + log n)` |
-| `intersect?(a, b)`      | `O(log n)`     |
-| `remove(a, b)`           | `O(k.log n)`   |
-| `at(x)`, `cover?(x)`     | `O(log n)`     |
-| `hull`                   | `O(1)`         |
-| `each`, `to_a`           | `O(n)`         |
-| `check!`                 | `O(n)`         |
+| operation                                    | description                                                                                                              | complexity     |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------- |
+| `DisjointIntervalTree.new(intervals = nil)`  | Build an empty tree, or one filled with the given `[a, b]` pairs.                                                         | `O(m.log m)`   |
+| `insert(a, b)`                               | Add `[a..b[`, raising `OverlapError` if it intersects an already stored interval.                                         | `O(log n)`     |
+| `insert?(a, b)`                              | Same as `insert`, but returns `false` instead of raising when it would overlap.                                           | `O(log n)`     |
+| `intersect(a, b, &blk)`                      | Yield every stored interval intersecting `[a..b[` in increasing order, or return them as an array when given no block.    | `O(k + log n)` |
+| `intersect?(a, b)`                           | Whether at least one stored interval intersects `[a..b[`.                                                                 | `O(log n)`     |
+| `remove(a, b, &blk)`                         | Remove every stored interval intersecting `[a..b[` - whole, never split - and return how many went.                       | `O(k.log n)`   |
+| `at(x)`                                      | The stored interval containing the point `x`, or `nil`.                                                                   | `O(log n)`     |
+| `cover?(x)`                                  | Whether the point `x` falls inside a stored interval.                                                                     | `O(log n)`     |
+| `hull`                                       | The smallest interval enclosing every stored one, read straight off the root augment.                                     | `O(1)`         |
+| `size`, `length`                             | How many intervals are stored.                                                                                            | `O(1)`         |
+| `empty?`                                     | Whether the tree holds no interval at all.                                                                                | `O(1)`         |
+| `height`                                     | Height of the underlying AVL tree, for tests and diagnostics.                                                             | `O(1)`         |
+| `coverage`                                   | Total length covered, that is the sum of the lengths of the stored intervals.                                             | `O(n)`         |
+| `each(&blk)`                                 | Yield every stored interval in increasing order, or return an `Enumerator` when given no block.                           | `O(n)`         |
+| `to_a`, `entries`                            | Every stored interval as an array of `[a, b]` pairs, in increasing order.                                                 | `O(n)`         |
+| `map`, `select`, ...                         | Anything `Enumerable` provides, built on `each`.                                                                          | `O(n)`         |
+| `clear`                                      | Drop every interval, leaving the tree usable.                                                                             | `O(n)`         |
+| `dup`                                        | A deep copy, sharing no node with the original.                                                                           | `O(n.log n)`   |
+| `==`                                         | Whether two trees hold exactly the same intervals.                                                                        | `O(n)`         |
+| `check!`                                     | Re-derive every structural invariant, raising `CorruptedError` if one is broken.                                          | `O(n)`         |
+| `inspect`, `to_s`                            | A short `#<DisjointIntervalTree size=... height=...>` summary.                                                            | `O(1)`         |
 
 ## Ruby API
 
@@ -87,7 +101,7 @@ tree.remove(a, b) { |x, y| ... }       # ... and yields each removed interval
 
 # --- queries --------------------------------------------------------------
 
-tree.intersect?(a, b)       # -> true if any stored interval intersect [a..b[
+tree.intersect?(a, b)        # -> true if any stored interval intersect [a..b[
 tree.at(x)                   # -> [a, b] containing the point x, or nil
 tree.cover?(x)               # -> true if x is covered by a stored interval
 tree.hull                    # -> [a, b] spanning every interval, or nil
@@ -243,16 +257,46 @@ Both suites cross-check the tree against a naive reference implementation on
 randomized workloads, and validate every structural invariant after each
 operation. `rake verify SEEDS=100` widens the randomized sweep.
 
-### Releasing
+## Releasing
 
-`rake build` pins `SOURCE_DATE_EPOCH` to the last commit, so the gem is
-byte-reproducible: anyone can rebuild a release from its tag and get the same
-file. It prints the resulting sha256, which is what downstream packagers
-record.
+Releases are cut from `main`, with CI green.
+
+**1. Bump the version.**
+
+```ruby
+# lib/disjoint_interval_tree/version.rb
+VERSION = '0.2.0'
+```
+
+**2. Commit, push, and wait for CI.** `rake release` re-runs everything
+locally, but a release should not be cut from a commit CI has not seen.
+
+**3. Publish.**
 
 ```sh
-rake build                # prints the sha256 and the spack `version(...)` line
-rake release              # verify, tag, push, and publish to rubygems.org
+rake release
+```
+
+It refuses to do anything unless the working tree is clean, the branch is
+`main`, and the tag is still free. It then runs `rake verify`, tags `vX.Y.Z`,
+pushes the tag, and `gem push`es the gem it just built.
+
+**4. Attach the gem to a GitHub release.** `rake release` prints this command
+with the version filled in:
+
+```sh
+gh release create vX.Y.Z pkg/disjoint_interval_tree-X.Y.Z.gem \
+    --title vX.Y.Z --generate-notes
+```
+
+**5. Update the downstream packagers.** `rake release` prints the sha256 of
+what it published, as a ready to paste spack `version(...)` line. For
+[THAPI-spack](https://github.com/argonne-lcf/THAPI-spack), that is
+`packages/ruby-disjoint-interval-tree/package.py`. The published artifact can
+also be checksummed directly, which is the authoritative source:
+
+```sh
+spack checksum ruby-disjoint-interval-tree X.Y.Z
 ```
 
 ## References

@@ -225,7 +225,7 @@ task :release do
   puts "published #{tag}."
   puts
   puts 'attach the gem to the github release with:'
-  puts "  gh release create #{tag} #{GEM_FILE} --title #{tag} --notes-from-tag"
+  puts "  gh release create #{tag} #{GEM_FILE} --title #{tag} --generate-notes"
   puts
   puts 'and record this in the spack recipe:'
   puts %(  version("#{VERSION}", sha256="#{Digest::SHA256.file(GEM_FILE).hexdigest}", expand=False))
