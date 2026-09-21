@@ -478,17 +478,18 @@ rb_dit_cover_p(VALUE self, VALUE vx)
  *  The smallest interval including every stored interval, or nil when the tree
  *  is empty.
  *
- *  This is the `includes` augment of the root node, so it is O(1).
+ *  This is the hull augment of the root node, so it is O(1).
  */
 static VALUE
 rb_dit_hull(VALUE self)
 {
     const dit_t * tree = rb_dit_get(self);
 
-    if (tree->root == NULL)
+    dit_value_t a, b;
+    if (!dit_hull(tree, &a, &b))
         return Qnil;
 
-    return rb_dit_interval(tree->root->includes.a, tree->root->includes.b);
+    return rb_dit_interval(a, b);
 }
 
 /*

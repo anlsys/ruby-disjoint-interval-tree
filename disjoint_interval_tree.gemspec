@@ -16,7 +16,7 @@ Gem::Specification.new do |spec|
     the subtree it roots, so intersection queries prune whole subtrees in O(1).
   DESC
 
-  spec.homepage              = 'https://github.com/rpereira-dev/ruby-disjoint-interval-tree'
+  spec.homepage              = 'https://github.com/anlsys/ruby-disjoint-interval-tree'
   spec.license               = 'CECILL-C'
   spec.required_ruby_version = '>= 2.7.0'
 
@@ -25,6 +25,8 @@ Gem::Specification.new do |spec|
     'ext/**/*.{c,h,rb}',
     'test/**/*.{c,rb}',
     'test/c/Makefile',
+    'CHANGELOG.md',
+    'CITATION.cff',
     'README.md',
     'Rakefile',
     'disjoint_interval_tree.gemspec'
@@ -35,6 +37,8 @@ Gem::Specification.new do |spec|
 
   spec.metadata = {
     'source_code_uri'       => spec.homepage,
+    'changelog_uri'         => "#{spec.homepage}/blob/main/CHANGELOG.md",
+    'bug_tracker_uri'       => "#{spec.homepage}/issues",
     'rubygems_mfa_required' => 'true'
   }
 end

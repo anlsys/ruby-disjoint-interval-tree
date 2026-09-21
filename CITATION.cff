@@ -1,0 +1,67 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software in academic work, please cite the papers that
+  introduced the structures it derives from, listed under `references` below.
+title: disjoint_interval_tree
+abstract: >-
+  A set of pairwise disjoint half-open intervals, backed by an augmented AVL
+  tree written in C, with Ruby bindings. Each node caches the hull of the
+  subtree it roots, so intersection queries prune whole subtrees in constant
+  time.
+type: software
+license: CECILL-C
+repository-code: "https://github.com/anlsys/ruby-disjoint-interval-tree"
+authors:
+  - family-names: Pereira
+    given-names: Romain
+    email: rpereira@anl.gov
+    affiliation: Argonne National Laboratory
+    orcid: "https://orcid.org/0000-0003-1856-2172"
+keywords:
+  - interval tree
+  - AVL tree
+  - augmented tree
+  - ruby
+  - c
+
+references:
+  - type: conference-paper
+    title: >-
+      Taskgrind: Heavyweight Dynamic Binary Instrumentation for Parallel
+      Programs Analysis
+    authors:
+      - family-names: Pereira
+        given-names: Romain
+      - family-names: Stelle
+        given-names: George
+      - family-names: Carribault
+        given-names: Patrick
+    collection-title: >-
+      SC24-W: Workshops of the International Conference for High Performance
+      Computing, Networking, Storage and Analysis
+    year: 2024
+    month: 11
+    start: 214
+    end: 221
+    location:
+      name: Atlanta, GA, USA
+    doi: 10.1109/SCW63240.2024.00033
+    notes: Introduced the SPMT, see reference/spmt/
+
+  - type: conference-paper
+    title: Multi-GPU Memory Coherence for BLAS Matrices
+    authors:
+      - family-names: Pereira
+        given-names: Romain
+      - family-names: Polet
+        given-names: Pierre-Etienne
+      - family-names: Gautier
+        given-names: Thierry
+      - family-names: Perarnau
+        given-names: Swann
+    collection-title: >-
+      IPDPS-W HIPS: 31st International Workshop on High-level Parallel
+      Programming Models and Supportive Environments
+    year: 2026
+    month: 5
+    notes: Introduced the LP-Tree, see reference/lp-tree/

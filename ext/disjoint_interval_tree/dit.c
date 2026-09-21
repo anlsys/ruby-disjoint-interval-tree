@@ -50,13 +50,13 @@
 static inline int32_t
 dit_node_height(const dit_node_t * node)
 {
-    return node ? node->height : 0;
+    return node ? node->augment.height : 0;
 }
 
 static inline uint32_t
 dit_node_size(const dit_node_t * node)
 {
-    return node ? node->size : 0;
+    return node ? node->augment.size : 0;
 }
 
 /* balance factor: >0 means the left subtree is the deepest */
@@ -70,7 +70,7 @@ dit_node_balance(const dit_node_t * node)
 /* Recompute every augment of `node` from its - assumed up to date - children.
  * Must be called bottom-up after any structural change */
 static inline void
-dit_node_update(dit_node_t * node)
+dit_node_refresh_augment(dit_node_t * node)
 {
     DIT_ASSERT(node);
     DIT_ASSERT(node->a < node->b);
@@ -81,28 +81,29 @@ dit_node_update(dit_node_t * node)
     const int32_t hl = dit_node_height(l);
     const int32_t hr = dit_node_height(r);
 
-    node->height = 1 + DIT_MAX(hl, hr);
-    node->size   = 1 + dit_node_size(l) + dit_node_size(r);
+    node->augment.height = 1 + DIT_MAX(hl, hr);
+    node->augment.size   = 1 + dit_node_size(l) + dit_node_size(r);
 
-    /* hull of the subtree, as the lp-tree `includes.hyperrect` */
-    node->includes.a = node->a;
-    node->includes.b = node->b;
+    /* englobing interval of the subtree, as the lp-tree `includes.hyperrect` */
+    node->augment.hull.a = node->a;
+    node->augment.hull.b = node->b;
     if (l)
     {
-        node->includes.a = DIT_MIN(node->includes.a, l->includes.a);
-        node->includes.b = DIT_MAX(node->includes.b, l->includes.b);
+        node->augment.hull.a = DIT_MIN(node->augment.hull.a, l->augment.hull.a);
+        node->augment.hull.b = DIT_MAX(node->augment.hull.b, l->augment.hull.b);
     }
     if (r)
     {
-        node->includes.a = DIT_MIN(node->includes.a, r->includes.a);
-        node->includes.b = DIT_MAX(node->includes.b, r->includes.b);
+        node->augment.hull.a = DIT_MIN(node->augment.hull.a, r->augment.hull.a);
+        node->augment.hull.b = DIT_MAX(node->augment.hull.b, r->augment.hull.b);
     }
 
     /* intervals being disjoint and ordered on `a`, they are also ordered on
      * `b`: the hull is exactly [leftmost->a .. rightmost->b[ */
-    DIT_ASSERT(node->includes.a == (l ? l->includes.a : node->a));
-    DIT_ASSERT(node->includes.b == (r ? r->includes.b : node->b));
-    DIT_ASSERT(node->includes.a <= node->a && node->b <= node->includes.b);
+    DIT_ASSERT(node->augment.hull.a == (l ? l->augment.hull.a : node->a));
+    DIT_ASSERT(node->augment.hull.b == (r ? r->augment.hull.b : node->b));
+    DIT_ASSERT(node->augment.hull.a <= node->a);
+    DIT_ASSERT(node->b <= node->augment.hull.b);
 }
 
 static inline dit_node_t *
@@ -114,14 +115,14 @@ dit_node_new(dit_value_t a, dit_value_t b)
     if (node == NULL)
         return NULL;
 
-    node->a          = a;
-    node->b          = b;
-    node->left       = NULL;
-    node->right      = NULL;
-    node->includes.a = a;
-    node->includes.b = b;
-    node->height     = 1;
-    node->size       = 1;
+    node->a              = a;
+    node->b              = b;
+    node->left           = NULL;
+    node->right          = NULL;
+    node->augment.hull.a = a;
+    node->augment.hull.b = b;
+    node->augment.height = 1;
+    node->augment.size   = 1;
 
     return node;
 }
@@ -160,8 +161,8 @@ dit_rotate_right(dit_node_t * A)
     B->right = A;
     A->left  = E;
 
-    dit_node_update(A);
-    dit_node_update(B);
+    dit_node_refresh_augment(A);
+    dit_node_refresh_augment(B);
 
     return B;
 }
@@ -186,8 +187,8 @@ dit_rotate_left(dit_node_t * A)
     C->left  = A;
     A->right = D;
 
-    dit_node_update(A);
-    dit_node_update(C);
+    dit_node_refresh_augment(A);
+    dit_node_refresh_augment(C);
 
     return C;
 }
@@ -276,6 +277,24 @@ dit_height(const dit_t * tree)
     return (int) dit_node_height(tree->root);
 }
 
+int
+dit_hull(const dit_t * tree, dit_value_t * a, dit_value_t * b)
+{
+    DIT_ASSERT(tree);
+    DIT_ASSERT(a && b);
+
+    if (tree->root == NULL)
+        return 0;
+
+    /* the root augment already englobes every stored interval */
+    *a = tree->root->augment.hull.a;
+    *b = tree->root->augment.hull.b;
+
+    DIT_ASSERT(*a < *b);
+
+    return 1;
+}
+
 ////////////
 // INSERT //
 ////////////
@@ -314,7 +333,7 @@ dit_insert_from(
     if (*status != DIT_OK)
         return node;
 
-    dit_node_update(node);
+    dit_node_refresh_augment(node);
     return dit_rebalance(node);
 }
 
@@ -410,7 +429,7 @@ dit_intersect_from(
         return 0;
 
     /* augment pruning: no interval of this subtree can intersect [a..b[ */
-    if (!DIT_INTERSECTS(a, b, node->includes.a, node->includes.b))
+    if (!DIT_INTERSECTS(a, b, node->augment.hull.a, node->augment.hull.b))
         return 0;
 
     int r;
@@ -496,7 +515,7 @@ dit_detach_min(dit_node_t * node, dit_node_t ** out)
     }
 
     node->left = dit_detach_min(node->left, out);
-    dit_node_update(node);
+    dit_node_refresh_augment(node);
     return dit_rebalance(node);
 }
 
@@ -539,7 +558,7 @@ dit_remove_from(dit_node_t * node, dit_value_t key)
         DIT_FREE(successor);
     }
 
-    dit_node_update(node);
+    dit_node_refresh_augment(node);
     return dit_rebalance(node);
 }
 
@@ -676,10 +695,10 @@ dit_check_from(
     /* 4. height augment */
     const int32_t hl = dit_node_height(l);
     const int32_t hr = dit_node_height(r);
-    DIT_CHECK_THAT(ctx, node->height == 1 + DIT_MAX(hl, hr),
+    DIT_CHECK_THAT(ctx, node->augment.height == 1 + DIT_MAX(hl, hr),
             "node [%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[ has height %d "
             "instead of %d",
-            node->a, node->b, (int) node->height, (int) (1 + DIT_MAX(hl, hr)));
+            node->a, node->b, (int) node->augment.height, (int) (1 + DIT_MAX(hl, hr)));
 
     /* 5. AVL balance */
     DIT_CHECK_THAT(ctx, -1 <= hl - hr && hl - hr <= 1,
@@ -689,36 +708,36 @@ dit_check_from(
 
     /* 6. size augment */
     const uint32_t size = 1 + dit_node_size(l) + dit_node_size(r);
-    DIT_CHECK_THAT(ctx, node->size == size,
+    DIT_CHECK_THAT(ctx, node->augment.size == size,
             "node [%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[ has size %u "
             "instead of %u",
-            node->a, node->b, node->size, size);
+            node->a, node->b, node->augment.size, size);
 
-    /* 7. `includes` augment is the hull of the subtree */
-    dit_value_t ia = node->a;
-    dit_value_t ib = node->b;
+    /* 7. the hull augment englobes the whole subtree */
+    dit_value_t ha = node->a;
+    dit_value_t hb = node->b;
     if (l)
     {
-        ia = DIT_MIN(ia, l->includes.a);
-        ib = DIT_MAX(ib, l->includes.b);
+        ha = DIT_MIN(ha, l->augment.hull.a);
+        hb = DIT_MAX(hb, l->augment.hull.b);
     }
     if (r)
     {
-        ia = DIT_MIN(ia, r->includes.a);
-        ib = DIT_MAX(ib, r->includes.b);
+        ha = DIT_MIN(ha, r->augment.hull.a);
+        hb = DIT_MAX(hb, r->augment.hull.b);
     }
-    DIT_CHECK_THAT(ctx, node->includes.a == ia && node->includes.b == ib,
-            "node [%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[ includes "
+    DIT_CHECK_THAT(ctx, node->augment.hull.a == ha && node->augment.hull.b == hb,
+            "node [%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[ has hull "
             "[%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[ instead of "
             "[%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[",
-            node->a, node->b, node->includes.a, node->includes.b, ia, ib);
+            node->a, node->b, node->augment.hull.a, node->augment.hull.b, ha, hb);
 
     /* 8. the hull spans exactly from the leftmost to the rightmost interval */
-    DIT_CHECK_THAT(ctx, node->includes.a == (l ? l->includes.a : node->a),
+    DIT_CHECK_THAT(ctx, node->augment.hull.a == (l ? l->augment.hull.a : node->a),
             "node [%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[ does not start its "
             "hull at its leftmost descendant",
             node->a, node->b);
-    DIT_CHECK_THAT(ctx, node->includes.b == (r ? r->includes.b : node->b),
+    DIT_CHECK_THAT(ctx, node->augment.hull.b == (r ? r->augment.hull.b : node->b),
             "node [%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[ does not end its "
             "hull at its rightmost descendant",
             node->a, node->b);
@@ -757,10 +776,10 @@ dit_check(const dit_t * tree, char * err, size_t errlen)
         return 1;
     }
 
-    if (tree->root && (size_t) tree->root->size != tree->n)
+    if (tree->root && (size_t) tree->root->augment.size != tree->n)
     {
         dit_check_fail(&ctx, "root size augment is %u but the tree holds %zu nodes",
-                tree->root->size, tree->n);
+                tree->root->augment.size, tree->n);
         return 1;
     }
 
@@ -802,9 +821,9 @@ dit_dump_dot_from(const dit_node_t * node, FILE * f)
 
     fprintf(f, "    N%p[shape=record, label=\"{[%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[",
             (const void *) node, node->a, node->b);
-    fprintf(f, "|includes [%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[",
-            node->includes.a, node->includes.b);
-    fprintf(f, "|h=%d, n=%u}\"] ;\n", (int) node->height, node->size);
+    fprintf(f, "|hull [%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[",
+            node->augment.hull.a, node->augment.hull.b);
+    fprintf(f, "|h=%d, n=%u}\"] ;\n", (int) node->augment.height, node->augment.size);
 
     for (int dir = DIT_LEFT ; dir < DIT_N_CHILDREN ; ++dir)
     {

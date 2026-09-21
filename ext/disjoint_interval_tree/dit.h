@@ -19,7 +19,7 @@
 **
 **  A self-balancing (AVL) binary search tree whose nodes are pairwise
 **  disjoint half-open intervals `[a..b[`, augmented - as in the lp-tree - with
-**  the hull of the subtree they root (`includes`), so that intersection
+**  the hull of the subtree they root (`augment.hull`), so that intersection
 **  queries can prune entire subtrees in O(1).
 **
 **  Ordering
@@ -36,7 +36,7 @@
 **
 **  Complexities, with `n` intervals stored and `k` intervals reported
 **      dit_insert      O(log n)
-**      dit_intersect  O(k + log n)
+**      dit_intersect   O(k + log n)
 **      dit_remove      O(k.log n)
 **      dit_at          O(log n)
 **      dit_each        O(n)
@@ -102,13 +102,37 @@ typedef enum
     /* `a >= b`: the interval is empty, nothing was done */
     DIT_EMPTY       = 1,
 
-    /* the interval intersect an already inserted one: contract violation,
+    /* the interval intersects an already inserted one: contract violation,
      * nothing was done */
     DIT_OVERLAP     = 2,
 
     /* out of memory */
     DIT_NOMEM       = 3
 }   dit_status_t;
+
+/* Everything a node caches about the subtree it roots.
+ *
+ * Augments are derived from the subtree only: they are recomputed bottom-up
+ * after every structural change, and are what makes the queries sublinear */
+typedef struct  dit_augment_s
+{
+    /* the englobing interval of the subtree, i.e. the smallest interval
+     * including every interval stored in that subtree. Since stored intervals
+     * are pairwise disjoint and ordered, it spans exactly from the `a` of the
+     * leftmost descendant to the `b` of the rightmost one.
+     *
+     * This is what lets a query prune a whole subtree in O(1) */
+    struct {
+        dit_value_t a, b;
+    } hull;
+
+    /* height of the subtree, a leaf has 1 */
+    int32_t height;
+
+    /* number of nodes in the subtree. 32 bits caps a tree to 2^32 intervals,
+     * which already is 224 GiB of nodes */
+    uint32_t size;
+}               dit_augment_t;
 
 typedef struct  dit_node_s
 {
@@ -125,18 +149,8 @@ typedef struct  dit_node_s
         };
     };
 
-    /* augment: hull of the subtree rooted at this node, i.e. the smallest
-     * interval including every interval of that subtree */
-    struct {
-        dit_value_t a, b;
-    } includes;
-
-    /* augment: height of the subtree rooted at this node (a leaf has 1) */
-    int32_t height;
-
-    /* augment: number of nodes of the subtree rooted at this node. 32 bits
-     * caps a tree to 2^32 intervals, which already is 224 GiB of nodes */
-    uint32_t size;
+    /* what this node caches about the subtree it roots */
+    dit_augment_t augment;
 }               dit_node_t;
 
 typedef struct  dit_s
@@ -175,8 +189,13 @@ int dit_empty(const dit_t * tree);
 /* Height of the tree, 0 if empty */
 int dit_height(const dit_t * tree);
 
+/* The englobing interval of the whole tree, read from the root augment.
+ * Returns 1 and writes it to `a` and `b`, or returns 0 and leaves them
+ * untouched when the tree is empty. O(1) */
+int dit_hull(const dit_t * tree, dit_value_t * a, dit_value_t * b);
+
 /* Insert `[a..b[`.
- * Returns DIT_OK, DIT_EMPTY if `a >= b`, DIT_OVERLAP if `[a..b[` intersect an
+ * Returns DIT_OK, DIT_EMPTY if `a >= b`, DIT_OVERLAP if `[a..b[` intersects an
  * already inserted interval, DIT_NOMEM on allocation failure. The tree is left
  * unchanged unless DIT_OK is returned */
 dit_status_t dit_insert(dit_t * tree, dit_value_t a, dit_value_t b);
@@ -190,7 +209,7 @@ const dit_node_t * dit_intersecting(const dit_t * tree, dit_value_t a, dit_value
 /* Return the stored interval containing the point `x`, or NULL */
 const dit_node_t * dit_at(const dit_t * tree, dit_value_t x);
 
-/* 1 if at least one stored interval intersect `[a..b[`, 0 otherwise */
+/* 1 if at least one stored interval intersects `[a..b[`, 0 otherwise */
 int dit_intersect_p(const dit_t * tree, dit_value_t a, dit_value_t b);
 
 /* Invoke `cb` on every stored interval intersecting `[a..b[`, in increasing

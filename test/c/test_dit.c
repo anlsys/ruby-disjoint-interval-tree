@@ -224,6 +224,13 @@ test_empty(void)
     ASSERT_EQ(dit_intersect_p(&tree, 0, 100), 0);
     ASSERT_EQ(dit_remove(&tree, 0, 100), 0);
 
+    /* an empty tree has no hull, and the out params are left untouched */
+    dit_value_t ha = 42;
+    dit_value_t hb = 43;
+    ASSERT_EQ(dit_hull(&tree, &ha, &hb), 0);
+    ASSERT_EQ(ha, 42);
+    ASSERT_EQ(hb, 43);
+
     collect_t c;
     collect_init(&c);
     ASSERT_EQ(dit_intersect(&tree, 0, 100, collect_cb, &c), 0);
@@ -246,9 +253,11 @@ test_insert_single(void)
     ASSERT_EQ(dit_empty(&tree), 0);
     ASSERT_EQ(dit_height(&tree), 1);
 
-    /* the hull of a single node is the node itself */
-    ASSERT_EQ(tree.root->includes.a, 10);
-    ASSERT_EQ(tree.root->includes.b, 20);
+    /* the hull of a single node is the node interval itself */
+    ASSERT_EQ(tree.root->augment.hull.a, 10);
+    ASSERT_EQ(tree.root->augment.hull.b, 20);
+    ASSERT_EQ(tree.root->augment.height, 1);
+    ASSERT_EQ(tree.root->augment.size, 1);
 
     /* half-open interval: 10 is inside, 20 is not */
     ASSERT(dit_at(&tree, 9) == NULL);
@@ -326,6 +335,70 @@ test_ordering(void)
         ASSERT(c.intervals[i - 1].b <= c.intervals[i].a);
     ASSERT_EQ(c.intervals[0].a, 0);
     ASSERT_EQ(c.intervals[6].a, 90);
+
+    dit_destroy(&tree);
+}
+
+/* the hull augment must follow every mutation, wherever it happens in the
+ * tree, and whatever rotations it triggers */
+static void
+test_hull_augment(void)
+{
+    dit_t tree;
+    dit_init(&tree);
+
+    dit_value_t a, b;
+
+    ASSERT_EQ(dit_insert(&tree, 100, 110), DIT_OK);
+    ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
+    ASSERT_EQ(a, 100);
+    ASSERT_EQ(b, 110);
+
+    /* growing on the left moves the lower bound only */
+    ASSERT_EQ(dit_insert(&tree, 10, 20), DIT_OK);
+    ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
+    ASSERT_EQ(a, 10);
+    ASSERT_EQ(b, 110);
+
+    /* growing on the right moves the upper bound only */
+    ASSERT_EQ(dit_insert(&tree, 200, 210), DIT_OK);
+    ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
+    ASSERT_EQ(a, 10);
+    ASSERT_EQ(b, 210);
+
+    /* inserting in between changes nothing */
+    ASSERT_EQ(dit_insert(&tree, 50, 60), DIT_OK);
+    ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
+    ASSERT_EQ(a, 10);
+    ASSERT_EQ(b, 210);
+
+    /* enough insertions to trigger rotations at the root */
+    for (dit_value_t i = 0 ; i < 64 ; ++i)
+        ASSERT_EQ(dit_insert(&tree, 1000 + 10 * i, 1000 + 10 * i + 5), DIT_OK);
+    ASSERT_COHERENT(&tree);
+    ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
+    ASSERT_EQ(a, 10);
+    ASSERT_EQ(b, 1635);
+
+    /* the hull shrinks back when the extremities are removed */
+    ASSERT_EQ(dit_remove(&tree, 10, 20), 1);
+    ASSERT_EQ(dit_remove(&tree, 1630, 1635), 1);
+    ASSERT_COHERENT(&tree);
+    ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
+    ASSERT_EQ(a, 50);
+    ASSERT_EQ(b, 1625);
+
+    /* the hull of a subtree englobes it, and only it */
+    ASSERT(tree.root->augment.hull.a == 50);
+    ASSERT(tree.root->augment.hull.b == 1625);
+    if (tree.root->left)
+        ASSERT(tree.root->left->augment.hull.b <= tree.root->a);
+    if (tree.root->right)
+        ASSERT(tree.root->right->augment.hull.a >= tree.root->b);
+
+    /* emptying the tree removes the hull */
+    dit_clear(&tree);
+    ASSERT_EQ(dit_hull(&tree, &a, &b), 0);
 
     dit_destroy(&tree);
 }
@@ -559,8 +632,8 @@ test_extreme_values(void)
     ASSERT_EQ(dit_insert(&tree, 1, DIT_VALUE_MAX - 1), DIT_OK);
     ASSERT_COHERENT(&tree);
 
-    ASSERT_EQ(tree.root->includes.a, 0);
-    ASSERT_EQ(tree.root->includes.b, DIT_VALUE_MAX);
+    ASSERT_EQ(tree.root->augment.hull.a, 0);
+    ASSERT_EQ(tree.root->augment.hull.b, DIT_VALUE_MAX);
 
     /* DIT_VALUE_MAX can never be covered by a half-open interval */
     ASSERT(dit_at(&tree, DIT_VALUE_MAX) == NULL);
@@ -599,22 +672,22 @@ test_check_detects_corruption(void)
     ASSERT_EQ(dit_check(&tree, err, sizeof(err)), 0);
 
     /* corrupt the hull augment */
-    const dit_value_t saved_includes_b = tree.root->includes.b;
-    tree.root->includes.b -= 1;
+    const dit_value_t saved_hull_b = tree.root->augment.hull.b;
+    tree.root->augment.hull.b -= 1;
     ASSERT(dit_check(&tree, err, sizeof(err)) != 0);
-    tree.root->includes.b = saved_includes_b;
+    tree.root->augment.hull.b = saved_hull_b;
     ASSERT_EQ(dit_check(&tree, err, sizeof(err)), 0);
 
     /* corrupt the height augment */
-    tree.root->height += 1;
+    tree.root->augment.height += 1;
     ASSERT(dit_check(&tree, err, sizeof(err)) != 0);
-    tree.root->height -= 1;
+    tree.root->augment.height -= 1;
     ASSERT_EQ(dit_check(&tree, err, sizeof(err)), 0);
 
     /* corrupt the size augment */
-    tree.root->size += 1;
+    tree.root->augment.size += 1;
     ASSERT(dit_check(&tree, err, sizeof(err)) != 0);
-    tree.root->size -= 1;
+    tree.root->augment.size -= 1;
     ASSERT_EQ(dit_check(&tree, err, sizeof(err)), 0);
 
     /* make the root interval empty */
@@ -663,7 +736,26 @@ test_dump_dot(void)
 // RANDOMIZED TESTS  //
 ///////////////////////
 
+/* Seeds, sizes and intervals are decimal everywhere in this file. The few
+ * constants below are the published bit patterns of splitmix64 and
+ * xorshift64*, and are the only thing left in hexadecimal: they are chosen for
+ * their bits, not for their value, and writing them in decimal would only make
+ * them unrecognizable */
 static uint64_t rng_state = 0x853c49e6748fea9bULL;
+
+/* xorshift64* needs a non-zero, well spread state: run the seed through a
+ * splitmix64 avalanche so that consecutive seeds give unrelated streams.
+ * Simply forcing the state odd would make seeds 2k and 2k+1 equivalent, and
+ * halve the coverage of a `rake test:seeds` sweep */
+static uint64_t
+rng_seed(uint64_t seed)
+{
+    seed += 0x9E3779B97F4A7C15ULL;
+    seed = (seed ^ (seed >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    seed = (seed ^ (seed >> 27)) * 0x94D049BB133111EBULL;
+    seed ^=  seed >> 31;
+    return seed ? seed : 1;
+}
 
 static uint64_t
 rng_next(void)
@@ -805,8 +897,8 @@ test_random_large(void)
 {
     /* the paranoid build checks the whole structure after every mutation,
      * which is O(n): keep the tree small enough for the suite to stay fast */
-    const uint64_t universe   = DIT_PARANOID ? (1u << 14) : (1u << 20);
-    const int      iterations = DIT_PARANOID ? 20000 : 200000;
+    const uint64_t universe   = DIT_PARANOID ?  20000 :  1000000;
+    const int      iterations = DIT_PARANOID ?  20000 :   200000;
 
     dit_t tree;
     dit_init(&tree);
@@ -943,17 +1035,23 @@ test_random_insert_then_remove(void)
 int
 main(int argc, char ** argv)
 {
+    uint64_t seed = 0;
     if (argc > 1)
-        rng_state = strtoull(argv[1], NULL, 0) | 1;
+    {
+        /* base 10 explicitly: a `0`-prefixed seed is a decimal one, not octal */
+        seed = strtoull(argv[1], NULL, 10);
+        rng_state = rng_seed(seed);
+    }
 
-    printf("running dit tests (seed=%" PRIu64 ", paranoid=%d)\n",
-            rng_state, DIT_PARANOID);
+    printf("running dit tests (seed=%" PRIu64 ", state=%" PRIu64 ", paranoid=%d)\n",
+            seed, rng_state, DIT_PARANOID);
 
     RUN(test_empty);
     RUN(test_insert_single);
     RUN(test_insert_empty_interval);
     RUN(test_insert_overlap_is_rejected);
     RUN(test_ordering);
+    RUN(test_hull_augment);
     RUN(test_intersect);
     RUN(test_intersect_early_stop);
     RUN(test_remove);

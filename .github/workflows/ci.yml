@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The C core on its own: sanitizers, valgrind and a wide randomized sweep.
+  # None of this needs ruby.
+  c:
+    name: C core (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      # -O0 + DIT_PARANOID (every invariant re-checked after every mutation),
+      # then address+undefined+leak sanitizers, then -O3 -DNDEBUG
+      - name: Debug, sanitized and release builds
+        run: make -C test/c all
+
+      - name: Valgrind
+        run: make -C test/c valgrind
+
+      # the randomized cross-checks against the naive model are the strongest
+      # correctness signal, so replay them over many seeds
+      - name: Randomized seed sweep
+        run: |
+          for seed in $(seq 1 50); do
+            make -C test/c debug SEED=$seed
+          done
+
+  # The extension and the bindings, on every supported ruby. The gemspec
+  # claims >= 2.7, so >= 2.7 is what gets tested.
+  ruby:
+    name: Ruby ${{ matrix.ruby }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ['3.1', '3.2', '3.3', '3.4']
+        os: [ubuntu-latest]
+        include:
+          # ruby/setup-ruby does not ship 2.7 and 3.0 for ubuntu 24.04
+          - ruby: '2.7'
+            os: ubuntu-22.04
+          - ruby: '3.0'
+            os: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+
+      - name: Build the extension
+        run: rake recompile
+
+      - name: Ruby test suite
+        run: rake test
+
+      # same suite, against an extension checking the whole structure after
+      # every single mutation
+      - name: Ruby test suite, paranoid extension
+        run: rake test:paranoid
+
+      # builds the gem, installs it in a sandbox and runs the suite against the
+      # *installed* gem: the only check that the packaging is not broken
+      - name: Packaged gem
+        run: rake test:gem
+
+      - name: Randomized seed sweep
+        run: rake test:seeds SEEDS=10

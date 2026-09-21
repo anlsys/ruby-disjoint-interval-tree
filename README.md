@@ -3,25 +3,43 @@
 A set of **pairwise disjoint half-open intervals `[a..b[`**, implemented in C
 and exposed to Ruby.
 
-It is a self-balancing (AVL) binary search tree, augmented - as the `lp-tree`
-it is inspired from - with the *hull* of the subtree each node roots, so that
-intersection queries prune whole subtrees in `O(1)`.
+It is a self-balancing (AVL) binary search tree, augmented - as the LP-Tree it
+is inspired from, see [References](#references) - with the *hull* of the
+subtree each node roots, so that intersection queries prune whole subtrees in
+`O(1)`.
+
+## Installation
+
+```sh
+gem install disjoint_interval_tree
+```
+
+or, in a `Gemfile`:
+
+```ruby
+gem 'disjoint_interval_tree'
+```
+
+Ruby >= 2.7 and a C compiler are required: the extension is built at install
+time.
+
+## Synopsis
 
 ```ruby
 require 'disjoint_interval_tree'
 
 tree = DisjointIntervalTree.new
-tree.insert(0x1000, 0x2000)
-tree.insert(0x3000, 0x4000)
+tree.insert(10, 20)
+tree.insert(30, 40)
 
-tree.intersect(0x1800, 0x3800) do |a, b|
-  puts format('[0x%x..0x%x[', a, b)
+tree.intersect(15, 35) do |a, b|
+  puts "[#{a}..#{b}["
 end
-# => [0x1000..0x2000[
-# => [0x3000..0x4000[
+# => [10..20[
+# => [30..40[
 
-tree.remove(0x1800, 0x3800)   # => 2
-tree.to_a                     # => []
+tree.remove(15, 35)   # => 2
+tree.to_a             # => []
 ```
 
 ## Semantics
@@ -129,6 +147,31 @@ dit_remove(&tree, 5, 25);
 dit_destroy(&tree);
 ```
 
+### Node augments
+
+Each node stores its own interval, its children, and - in a single `augment`
+field - everything it caches about the subtree it roots:
+
+```c
+typedef struct dit_augment_s
+{
+    /* the englobing interval of the subtree, i.e. the smallest interval
+     * including every interval stored in that subtree */
+    struct { dit_value_t a, b; } hull;
+
+    /* height of the subtree, a leaf has 1 */
+    int32_t height;
+
+    /* number of nodes in the subtree */
+    uint32_t size;
+}   dit_augment_t;
+```
+
+Augments are derived from the subtree alone and recomputed bottom-up after
+every structural change, so a rotation only has to refresh the two nodes it
+moves. `hull` is what lets `dit_intersect()` discard a whole subtree with a
+single comparison; the root one is readable in O(1) through `dit_hull()`.
+
 Customization points, to define before including `dit.h`:
 
 | macro           | default                | purpose                                         |
@@ -149,8 +192,8 @@ Customization points, to define before including `dit.h`:
 4. the `height` augment of every node is correct,
 5. every node is AVL-balanced,
 6. the `size` augment of every node is correct,
-7. the `includes` augment of every node is the hull of its subtree,
-8. that hull spans exactly from the leftmost to the rightmost descendant,
+7. the `hull` augment of every node englobes its subtree exactly,
+8. that hull spans from the leftmost to the rightmost descendant,
 9. the cached cardinality matches the number of nodes,
 10. the tree depth is logarithmic in the number of nodes,
 11. no traversal is leaking.
@@ -161,14 +204,31 @@ insertion contract, ...).
 
 ## Building and testing
 
+Building the extension needs the ruby development headers (`ruby-dev` /
+`ruby-devel`, or any ruby built from source).
+
 ```sh
 rake compile                      # build the extension into lib/
-rake test                         # run the ruby test suite
-rake test:c                       # run the C test suite: debug, asan+ubsan, release
-rake test:valgrind                # run the C test suite under valgrind
-rake test:paranoid                # run the ruby test suite against a paranoid build
-rake                              # everything but valgrind
+rake recompile                    # force a full rebuild, use this when in doubt
+rake test                         # ruby test suite
+rake test:c                       # C test suite: debug, asan+ubsan, release
+rake test:valgrind                # C test suite under valgrind
+rake test:paranoid                # ruby test suite against a DIT_PARANOID build
+rake test:gem                     # build, install into a sandbox, test the installed gem
+rake                              # default: test:c + test
+rake verify                       # everything above, plus a randomized seed sweep
 ```
+
+What each configuration actually proves:
+
+| configuration                          | proves                                                                                        |
+| -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `test:c` debug (`-O0 -DDIT_PARANOID=1`) | all the invariants below are re-validated after *every* mutation, plus the inline `DIT_ASSERT`s |
+| `test:c` sanitize                       | no undefined behaviour, no out of bounds access, no leak, still paranoid                        |
+| `test:c` release (`-DNDEBUG`)           | the behaviour is identical with every assertion compiled out                                    |
+| `test:valgrind`                         | no invalid access and no leak, independently of the sanitizers                                  |
+| `test` / `test:paranoid`                | the ruby bindings, against the regular and the paranoid extension                               |
+| `test:gem`                              | the *packaged* gem installs and works, which `test` cannot tell                                 |
 
 The C test suite can also be driven directly:
 
@@ -179,7 +239,59 @@ make -C test/c debug SEED=42
 
 Both suites cross-check the tree against a naive reference implementation on
 randomized workloads, and validate every structural invariant after each
-operation.
+operation. `rake verify SEEDS=100` widens the randomized sweep.
+
+### Releasing
+
+`rake build` pins `SOURCE_DATE_EPOCH` to the last commit, so the gem is
+byte-reproducible: anyone can rebuild a release from its tag and get the same
+file. It prints the resulting sha256, which is what downstream packagers
+record.
+
+```sh
+rake build                # prints the sha256 and the spack `version(...)` line
+rake release              # verify, tag, push, and publish to rubygems.org
+```
+
+## References
+
+`dit` is a C rewrite of two structures published by the author, whose original
+sources are kept under `reference/` in the [source
+repository](https://github.com/anlsys/ruby-disjoint-interval-tree) for
+provenance:
+
+* `reference/spmt/spmt.cc` - the **SPMT**, a red-black tree of disjoint memory
+  intervals that merges adjacent ranges, used to track memory accesses in
+  Taskgrind:
+
+  > R. Pereira, G. Stelle and P. Carribault, *"Taskgrind: Heavyweight Dynamic
+  > Binary Instrumentation for Parallel Programs Analysis"*, SC24-W: Workshops
+  > of the International Conference for High Performance Computing, Networking,
+  > Storage and Analysis, Atlanta, GA, USA, 2024, pp. 214-221,
+  > doi: [10.1109/SCW63240.2024.00033](https://doi.org/10.1109/SCW63240.2024.00033).
+
+* `reference/lp-tree/` - the **LP-Tree**, a k-dimensional interval tree where
+  each node caches the hyperrectangle hull of its subtree, used to track
+  matrix tile coherence across GPUs:
+
+  > R. Pereira, P.-E. Polet, T. Gautier and S. Perarnau, *"Multi-GPU Memory
+  > Coherence for BLAS Matrices"*, IPDPS-W HIPS: 31st International Workshop on
+  > High-level Parallel Programming Models and Supportive Environments, 2026.
+
+What this library takes from each, and where it departs from them:
+
+* from the **LP-Tree**, the `includes` augment - the hull of the subtree cached
+  in every node, here `augment.hull` - and the case analysis of the insertion
+  descent. `dit` is the `K = 1` case, so the hyperrectangle collapses to an
+  interval;
+* from the **SPMT**, the flat C style, the callback-based traversals and the
+  coherency-check approach (`dit_check()`);
+* unlike both, `dit` never merges nor splits intervals. Keeping them disjoint
+  is a *caller contract*, checked at no extra cost during the insertion
+  descent, which is what lets a stored interval keep its identity;
+* unlike the SPMT, the tree is an AVL rather than a red-black tree: rebalancing
+  is bottom-up and recursive, which makes the augment refresh and the deletion
+  paths markedly harder to get wrong, at the cost of slightly more rotations.
 
 ## License
 
