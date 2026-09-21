@@ -129,13 +129,49 @@ namespace :test do
          'test/test_disjoint_interval_tree.rb')
     end
   end
+
+  # `spec.files` is a `Dir[]` glob over the working tree, so a file that is
+  # gitignored, or simply never added, still ends up in the gem while being
+  # absent from the repository. That asymmetry is silent, and it is how
+  # `test/c/Makefile` - matched by a bare `Makefile` ignore rule - shipped in
+  # the gem but broke every CI job.
+  desc 'Check that every file the gem ships is present and tracked by git'
+  task :files do
+    spec = Gem::Specification.load("#{EXT_NAME}.gemspec")
+    problems = []
+
+    spec.files.sort.each do |path|
+      problems << "#{path}: listed by the gemspec but missing on disk" unless File.exist?(path)
+
+      ignored = !`git check-ignore -- #{path}`.empty?
+      problems << "#{path}: shipped in the gem but matched by .gitignore" if ignored
+
+      tracked = system("git ls-files --error-unmatch -- #{path} > /dev/null 2>&1")
+      problems << "#{path}: shipped in the gem but not tracked by git" if !tracked && !ignored
+    end
+
+    # the repository needs these too, even though the gem does not ship them
+    ['.gitignore', 'Rakefile', '.github/workflows/ci.yml'].each do |path|
+      next if `git check-ignore -- #{path}`.empty?
+
+      problems << "#{path}: matched by .gitignore"
+    end
+
+    unless problems.empty?
+      problems.each { |p| warn "  #{p}" }
+      abort "test:files: #{problems.size} problem(s)"
+    end
+
+    puts "test:files: the #{spec.files.size} files the gem ships are all present and tracked"
+  end
 end
 
 desc 'Run both the C and the ruby test suites'
 task default: ['test:c', :test]
 
 desc 'Run every test suite: C, sanitizers, valgrind, ruby, paranoid, packaged gem, seed sweep'
-task verify: ['test:c', 'test:valgrind', :test, 'test:paranoid', 'test:gem', 'test:seeds'] do
+task verify: ['test:files', 'test:c', 'test:valgrind', :test, 'test:paranoid', 'test:gem',
+              'test:seeds'] do
   puts
   puts "#{EXT_NAME} #{VERSION}: everything passed"
 end

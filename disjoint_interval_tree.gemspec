@@ -25,7 +25,6 @@ Gem::Specification.new do |spec|
     'ext/**/*.{c,h,rb}',
     'test/**/*.{c,rb}',
     'test/c/Makefile',
-    'CHANGELOG.md',
     'CITATION.cff',
     'README.md',
     'Rakefile',
@@ -37,7 +36,6 @@ Gem::Specification.new do |spec|
 
   spec.metadata = {
     'source_code_uri'       => spec.homepage,
-    'changelog_uri'         => "#{spec.homepage}/blob/main/CHANGELOG.md",
     'bug_tracker_uri'       => "#{spec.homepage}/issues",
     'rubygems_mfa_required' => 'true'
   }

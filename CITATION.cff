@@ -46,7 +46,7 @@ references:
     location:
       name: Atlanta, GA, USA
     doi: 10.1109/SCW63240.2024.00033
-    notes: Introduced the SPMT, see reference/spmt/
+    notes: Introduced the SPMT, the disjoint interval tree this software rewrites.
 
   - type: conference-paper
     title: Multi-GPU Memory Coherence for BLAS Matrices
@@ -64,4 +64,4 @@ references:
       Programming Models and Supportive Environments
     year: 2026
     month: 5
-    notes: Introduced the LP-Tree, see reference/lp-tree/
+    notes: Introduced the LP-Tree, whose subtree hull augment this software reuses.

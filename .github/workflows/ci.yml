@@ -12,6 +12,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # `spec.files` globs the working tree, so a file that is gitignored or never
+  # added ships in the gem while being absent from the repository. Cheap, and
+  # it fails before anything is built.
+  files:
+    name: Packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - run: rake test:files
+
   # The C core on its own: sanitizers, valgrind and a wide randomized sweep.
   # None of this needs ruby.
   c:

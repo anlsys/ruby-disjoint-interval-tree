@@ -215,6 +215,7 @@ rake test:c                       # C test suite: debug, asan+ubsan, release
 rake test:valgrind                # C test suite under valgrind
 rake test:paranoid                # ruby test suite against a DIT_PARANOID build
 rake test:gem                     # build, install into a sandbox, test the installed gem
+rake test:files                   # every file the gem ships is present and tracked by git
 rake                              # default: test:c + test
 rake verify                       # everything above, plus a randomized seed sweep
 ```
@@ -229,6 +230,7 @@ What each configuration actually proves:
 | `test:valgrind`                         | no invalid access and no leak, independently of the sanitizers                                  |
 | `test` / `test:paranoid`                | the ruby bindings, against the regular and the paranoid extension                               |
 | `test:gem`                              | the *packaged* gem installs and works, which `test` cannot tell                                 |
+| `test:files`                            | the gem and the repository ship the same files, which neither of the above can tell             |
 
 The C test suite can also be driven directly:
 
@@ -255,14 +257,10 @@ rake release              # verify, tag, push, and publish to rubygems.org
 
 ## References
 
-`dit` is a C rewrite of two structures published by the author, whose original
-sources are kept under `reference/` in the [source
-repository](https://github.com/anlsys/ruby-disjoint-interval-tree) for
-provenance:
+`dit` is a C rewrite of two structures published by the author:
 
-* `reference/spmt/spmt.cc` - the **SPMT**, a red-black tree of disjoint memory
-  intervals that merges adjacent ranges, used to track memory accesses in
-  Taskgrind:
+* the **SPMT**, a red-black tree of disjoint memory intervals that merges
+  adjacent ranges, used to track memory accesses in Taskgrind:
 
   > R. Pereira, G. Stelle and P. Carribault, *"Taskgrind: Heavyweight Dynamic
   > Binary Instrumentation for Parallel Programs Analysis"*, SC24-W: Workshops
@@ -270,9 +268,9 @@ provenance:
   > Storage and Analysis, Atlanta, GA, USA, 2024, pp. 214-221,
   > doi: [10.1109/SCW63240.2024.00033](https://doi.org/10.1109/SCW63240.2024.00033).
 
-* `reference/lp-tree/` - the **LP-Tree**, a k-dimensional interval tree where
-  each node caches the hyperrectangle hull of its subtree, used to track
-  matrix tile coherence across GPUs:
+* the **LP-Tree**, a k-dimensional interval tree where each node caches the
+  hyperrectangle hull of its subtree, used to track matrix tile coherence
+  across GPUs:
 
   > R. Pereira, P.-E. Polet, T. Gautier and S. Perarnau, *"Multi-GPU Memory
   > Coherence for BLAS Matrices"*, IPDPS-W HIPS: 31st International Workshop on
@@ -283,7 +281,7 @@ What this library takes from each, and where it departs from them:
 * from the **LP-Tree**, the `includes` augment - the hull of the subtree cached
   in every node, here `augment.hull` - and the case analysis of the insertion
   descent. `dit` is the `K = 1` case, so the hyperrectangle collapses to an
-  interval;
+  interval, and `includes.hyperrect[0]` to `augment.hull`;
 * from the **SPMT**, the flat C style, the callback-based traversals and the
   coherency-check approach (`dit_check()`);
 * unlike both, `dit` never merges nor splits intervals. Keeping them disjoint

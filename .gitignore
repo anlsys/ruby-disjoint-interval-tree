@@ -1,11 +1,17 @@
+# Build trees. `rake compile` builds under tmp/ and stages the extension in
+# lib/, `rake build` drops the gem in pkg/
 /tmp/
 /pkg/
 *.gem
 *.o
 *.so
 *.bundle
-Makefile
-mkmf.log
+
+# `ruby extconf.rb` run in place, rather than through rake, leaves these
+# behind. Do NOT ignore `Makefile` unqualified: that pattern matches at any
+# depth and would silently exclude `test/c/Makefile`, which is a source file
+/ext/**/Makefile
+/ext/**/mkmf.log
 
 # C test binaries
 /test/c/test_dit_debug
