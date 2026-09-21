@@ -29,15 +29,16 @@ time.
 require 'disjoint_interval_tree'
 
 tree = DisjointIntervalTree.new
-tree.insert(10, 20)
-tree.insert(30, 40)
+tree.insert(10, 20, 'first')
+tree.insert(30, 40, 'second')
 
-tree.intersect(15, 35) do |a, b|
-  puts "[#{a}..#{b}["
+tree.intersect(15, 35) do |a, b, obj|
+  puts "[#{a}..#{b}[ -> #{obj}"
 end
-# => [10..20[
-# => [30..40[
+# => [10..20[ -> first
+# => [30..40[ -> second
 
+tree[15]              # => "first"
 tree.remove(15, 35)   # => 2
 tree.to_a             # => []
 ```
@@ -52,6 +53,9 @@ tree.to_a             # => []
   caller never inserts an interval overlapping an already inserted one.
   Breaking it raises `DisjointIntervalTree::OverlapError` and leaves the tree
   unchanged - intervals are never merged nor split implicitly.
+* Every interval carries an **object**, given at insertion and handed back by
+  every query and traversal. It defaults to `nil`, may be anything, and may be
+  shared by several intervals. See [Objects](#objects).
 
 ## Operations
 
@@ -60,13 +64,14 @@ intervals handed to the constructor:
 
 | operation                                    | description                                                                                                              | complexity     |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------- |
-| `DisjointIntervalTree.new(intervals = nil)`  | Build an empty tree, or one filled with the given `[a, b]` pairs.                                                         | `O(m.log m)`   |
-| `insert(a, b)`                               | Add `[a..b[`, raising `OverlapError` if it intersects an already stored interval.                                         | `O(log n)`     |
-| `insert?(a, b)`                              | Same as `insert`, but returns `false` instead of raising when it would overlap.                                           | `O(log n)`     |
+| `DisjointIntervalTree.new(intervals = nil)`  | Build an empty tree, or one filled with the given `[a, b]` or `[a, b, obj]` entries.                                      | `O(m.log m)`   |
+| `insert(a, b, obj = nil)`                    | Add `[a..b[` with its object, raising `OverlapError` if it intersects an already stored interval.                         | `O(log n)`     |
+| `insert?(a, b, obj = nil)`                   | Same as `insert`, but returns `false` instead of raising when it would overlap.                                           | `O(log n)`     |
 | `intersect(a, b, &blk)`                      | Yield every stored interval intersecting `[a..b[` in increasing order, or return them as an array when given no block.    | `O(k + log n)` |
 | `intersect?(a, b)`                           | Whether at least one stored interval intersects `[a..b[`.                                                                 | `O(log n)`     |
 | `remove(a, b, &blk)`                         | Remove every stored interval intersecting `[a..b[` - whole, never split - and return how many went.                       | `O(k.log n)`   |
-| `at(x)`                                      | The stored interval containing the point `x`, or `nil`.                                                                   | `O(log n)`     |
+| `at(x)`                                      | The stored interval containing the point `x` as `[a, b, obj]`, or `nil`.                                                  | `O(log n)`     |
+| `[](x)`                                      | The object of the interval containing the point `x`, or `nil`.                                                            | `O(log n)`     |
 | `cover?(x)`                                  | Whether the point `x` falls inside a stored interval.                                                                     | `O(log n)`     |
 | `hull`                                       | The smallest interval enclosing every stored one, read straight off the root augment.                                     | `O(1)`         |
 | `size`, `length`                             | How many intervals are stored.                                                                                            | `O(1)`         |
@@ -74,35 +79,36 @@ intervals handed to the constructor:
 | `height`                                     | Height of the underlying AVL tree, for tests and diagnostics.                                                             | `O(1)`         |
 | `coverage`                                   | Total length covered, that is the sum of the lengths of the stored intervals.                                             | `O(n)`         |
 | `each(&blk)`                                 | Yield every stored interval in increasing order, or return an `Enumerator` when given no block.                           | `O(n)`         |
-| `to_a`, `entries`                            | Every stored interval as an array of `[a, b]` pairs, in increasing order.                                                 | `O(n)`         |
+| `to_a`, `entries`                            | Every stored interval as an array of `[a, b, obj]` triples, in increasing order.                                          | `O(n)`         |
 | `map`, `select`, ...                         | Anything `Enumerable` provides, built on `each`.                                                                          | `O(n)`         |
 | `clear`                                      | Drop every interval, leaving the tree usable.                                                                             | `O(n)`         |
-| `dup`                                        | A deep copy, sharing no node with the original.                                                                           | `O(n.log n)`   |
-| `==`                                         | Whether two trees hold exactly the same intervals.                                                                        | `O(n)`         |
+| `dup`                                        | A copy sharing no node with the original, but sharing its objects.                                                        | `O(n.log n)`   |
+| `==`                                         | Whether two trees hold the same intervals, with objects comparing equal.                                                  | `O(n)`         |
 | `check!`                                     | Re-derive every structural invariant, raising `CorruptedError` if one is broken.                                          | `O(n)`         |
 | `inspect`, `to_s`                            | A short `#<DisjointIntervalTree size=... height=...>` summary.                                                            | `O(1)`         |
 
 ## Ruby API
 
 ```ruby
-tree = DisjointIntervalTree.new                      # empty
-tree = DisjointIntervalTree.new([[0, 10], [20, 30]]) # pre-filled
+tree = DisjointIntervalTree.new                           # empty
+tree = DisjointIntervalTree.new([[0, 10], [20, 30, :obj]]) # pre-filled
 
 # --- the three core operations -------------------------------------------
 
-tree.insert(a, b)            # -> self, raises OverlapError if it overlaps
-tree.insert?(a, b)           # -> true / false instead of raising
+tree.insert(a, b, obj = nil)  # -> self, raises OverlapError if it overlaps
+tree.insert?(a, b, obj = nil) # -> true / false instead of raising
 
-tree.intersect(a, b) { |x, y| ... }   # -> self, yields in increasing order
-tree.intersect(a, b)                  # -> [[x, y], ...] when no block given
+tree.intersect(a, b) { |x, y, obj| ... }  # -> self, yields increasing order
+tree.intersect(a, b)                      # -> [[x, y, obj], ...] w/o block
 
-tree.remove(a, b)                      # -> number of intervals removed
-tree.remove(a, b) { |x, y| ... }       # ... and yields each removed interval
+tree.remove(a, b)                         # -> number of intervals removed
+tree.remove(a, b) { |x, y, obj| ... }     # ... and yields each removed one
 
 # --- queries --------------------------------------------------------------
 
 tree.intersect?(a, b)        # -> true if any stored interval intersect [a..b[
-tree.at(x)                   # -> [a, b] containing the point x, or nil
+tree.at(x)                   # -> [a, b, obj] containing the point x, or nil
+tree[x]                      # -> the object of that interval, or nil
 tree.cover?(x)               # -> true if x is covered by a stored interval
 tree.hull                    # -> [a, b] spanning every interval, or nil
 tree.size                    # -> number of stored intervals
@@ -111,15 +117,15 @@ tree.height                  # -> height of the underlying AVL tree
 
 # --- iteration (DisjointIntervalTree includes Enumerable) -----------------
 
-tree.each { |a, b| ... }
-tree.to_a                    # -> [[a, b], ...], in increasing order
+tree.each { |a, b, obj| ... }
+tree.to_a                    # -> [[a, b, obj], ...], in increasing order
 tree.map { |a, b| b - a }
 tree.coverage                # -> total length covered
 
 # --- misc -----------------------------------------------------------------
 
 tree.clear                   # -> self
-tree.dup                     # -> deep copy
+tree.dup                     # -> copy, sharing the objects
 tree == other
 tree.check!                  # -> self, raises CorruptedError if an invariant
                              #    of the underlying tree is broken
@@ -133,6 +139,37 @@ raises `DisjointIntervalTree::Error` rather than corrupting the structure. The
 block given to `remove` is called after the removal, on a snapshot, so it may
 modify the tree.
 
+## Objects
+
+Every interval carries an object. It is given as the third argument of
+`insert`, defaults to `nil`, and comes back - by identity, never copied - from
+every query and traversal:
+
+```ruby
+tree = DisjointIntervalTree.new
+tree.insert(4096, 8192, Allocation.new(:device))
+
+tree[6000]        # => #<Allocation device>   the object at that address
+tree.at(6000)     # => [4096, 8192, #<Allocation device>]
+tree.intersect(6000, 12288) { |a, b, alloc| alloc.report(a, b) }
+tree.remove(6000, 12288) { |_a, _b, alloc| alloc.release }
+```
+
+* Any object is accepted, `nil` included, and several intervals may share one.
+* `tree[x]` returns `nil` both when no interval covers `x` and when the
+  covering interval holds a `nil` object. Use `at(x)` or `cover?(x)` to tell
+  the two apart.
+* The tree holds a **strong reference**: an object stays alive as long as its
+  interval is in the tree, and becomes collectable as soon as `remove` or
+  `clear` drops it.
+* `dup` is **shallow**: the copy shares the very same objects.
+* A compacting GC may move the objects: the tree updates its references
+  accordingly, so identity is preserved across `GC.compact`.
+
+In C the object is a plain `void *` that the tree only ever stores and hands
+back - it never reads, copies nor frees it. Pass a callback to `dit_remove()`
+to reclaim objects as their intervals go away.
+
 ## C API
 
 The Ruby extension is a thin binding over a standalone, dependency-free C
@@ -142,21 +179,30 @@ is into a C or C++ project.
 ```c
 #include "dit.h"
 
-static int print_cb(dit_value_t a, dit_value_t b, void * user)
+static int print_cb(dit_value_t a, dit_value_t b, dit_object_t obj, void * user)
 {
     (void) user;
-    printf("[%lu..%lu[\n", a, b);
+    printf("[%lu..%lu[ -> %s\n", a, b, (const char *) obj);
     return 0;   /* non-zero stops the traversal */
+}
+
+static int free_cb(dit_value_t a, dit_value_t b, dit_object_t obj, void * user)
+{
+    (void) a; (void) b; (void) user;
+    free(obj);
+    return 0;
 }
 
 dit_t tree;
 dit_init(&tree);
 
-if (dit_insert(&tree, 0, 10) != DIT_OK)
+if (dit_insert(&tree, 0, 10, strdup("payload")) != DIT_OK)
     { /* DIT_EMPTY, DIT_OVERLAP or DIT_NOMEM */ }
 
 dit_intersect(&tree, 5, 25, print_cb, NULL);
-dit_remove(&tree, 5, 25);
+
+/* the callback is optional, and lets the caller reclaim the objects */
+dit_remove(&tree, 5, 25, free_cb, NULL);
 
 dit_destroy(&tree);
 ```
@@ -191,6 +237,7 @@ Customization points, to define before including `dit.h`:
 | macro           | default                | purpose                                         |
 | --------------- | ---------------------- | ----------------------------------------------- |
 | `DIT_VALUE_T`   | `uint64_t`             | interval bound type                              |
+| `DIT_OBJECT_T`  | `void *`               | type of the object associated with each interval |
 | `DIT_ASSERT`    | `assert`               | internal consistency assertions                  |
 | `DIT_MALLOC`    | `malloc` / `free`      | node allocation                                  |
 | `DIT_PARANOID`  | `0`                    | run `dit_check()` after every mutation           |
@@ -215,6 +262,12 @@ Customization points, to define before including `dit.h`:
 On top of that, the implementation is littered with `DIT_ASSERT`s on the
 invariants it relies on locally (rotations, augment refresh, deletion cases,
 insertion contract, ...).
+
+Objects are opaque, so no invariant can be derived from them and `dit_check()`
+says nothing about them. Both test suites cover that blind spot instead, by
+storing in every interval an object derived from its lower bound and checking
+it on each reported interval - which is what pins down the one place an object
+could be left behind, the deletion of a node with two children.
 
 ## Building and testing
 

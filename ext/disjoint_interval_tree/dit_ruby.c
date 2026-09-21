@@ -17,6 +17,7 @@
 /* Ruby bindings for the disjoint interval tree */
 
 #include <ruby.h>
+#include <ruby/version.h>
 
 #include <inttypes.h>
 
@@ -37,6 +38,55 @@ static VALUE rb_dit_size(VALUE self);
 /////////////////////
 // TYPED DATA GLUE //
 /////////////////////
+
+/* The tree stores a VALUE per interval, so it is a ruby container: every
+ * object it holds has to be reachable by the garbage collector.
+ *
+ * `rb_gc_mark_movable` rather than `rb_gc_mark` keeps those objects
+ * relocatable by a compacting GC, at the cost of having to update them in
+ * `rb_dit_compact` afterwards.
+ *
+ * The type is deliberately *not* declared `RUBY_TYPED_WB_PROTECTED`: honouring
+ * the write barrier would require `RB_OBJ_WRITE()` on the slot of the node
+ * `dit_insert()` creates, hence handing that node back through the C API. The
+ * tree is therefore marked on every minor GC instead of only when it is
+ * written to, which is a fine trade for now */
+
+static void
+rb_dit_mark_node(dit_node_t * node)
+{
+    if (node == NULL)
+        return ;
+
+    rb_gc_mark_movable((VALUE) node->obj);
+
+    rb_dit_mark_node(node->left);
+    rb_dit_mark_node(node->right);
+}
+
+static void
+rb_dit_mark(void * ptr)
+{
+    rb_dit_mark_node(((dit_t *) ptr)->root);
+}
+
+static void
+rb_dit_compact_node(dit_node_t * node)
+{
+    if (node == NULL)
+        return ;
+
+    node->obj = (dit_object_t) rb_gc_location((VALUE) node->obj);
+
+    rb_dit_compact_node(node->left);
+    rb_dit_compact_node(node->right);
+}
+
+static void
+rb_dit_compact(void * ptr)
+{
+    rb_dit_compact_node(((dit_t *) ptr)->root);
+}
 
 static void
 rb_dit_free(void * ptr)
@@ -59,9 +109,10 @@ rb_dit_memsize(const void * ptr)
 static const rb_data_type_t rb_dit_type = {
     .wrap_struct_name = "DisjointIntervalTree",
     .function = {
-        .dmark    = NULL,
+        .dmark    = rb_dit_mark,
         .dfree    = rb_dit_free,
         .dsize    = rb_dit_memsize,
+        .dcompact = rb_dit_compact,
     },
     .parent   = NULL,
     .data     = NULL,
@@ -123,10 +174,12 @@ rb_dit_value(VALUE v)
             rb_obj_class(v));
 }
 
+/* An interval, as handed back to ruby: [a, b, obj] */
 static inline VALUE
-rb_dit_interval(dit_value_t a, dit_value_t b)
+rb_dit_interval(dit_value_t a, dit_value_t b, dit_object_t obj)
 {
-    return rb_assoc_new(ULL2NUM(a), ULL2NUM(b));
+    const VALUE triple[3] = { ULL2NUM(a), ULL2NUM(b), (VALUE) obj };
+    return rb_ary_new_from_values(3, triple);
 }
 
 static VALUE
@@ -143,17 +196,17 @@ rb_dit_alloc(VALUE klass)
 ////////////////
 
 static int
-rb_dit_cb_yield(dit_value_t a, dit_value_t b, void * user)
+rb_dit_cb_yield(dit_value_t a, dit_value_t b, dit_object_t obj, void * user)
 {
     (void) user;
-    rb_yield_values(2, ULL2NUM(a), ULL2NUM(b));
+    rb_yield_values(3, ULL2NUM(a), ULL2NUM(b), (VALUE) obj);
     return 0;
 }
 
 static int
-rb_dit_cb_push(dit_value_t a, dit_value_t b, void * user)
+rb_dit_cb_push(dit_value_t a, dit_value_t b, dit_object_t obj, void * user)
 {
-    rb_ary_push((VALUE) user, rb_dit_interval(a, b));
+    rb_ary_push((VALUE) user, rb_dit_interval(a, b, obj));
     return 0;
 }
 
@@ -230,15 +283,21 @@ rb_dit_initialize(int argc, VALUE * argv, VALUE self)
     {
         intervals = rb_check_array_type(intervals);
         if (NIL_P(intervals))
-            rb_raise(rb_eTypeError, "expected an array of [a, b] intervals");
+            rb_raise(rb_eTypeError, "expected an array of [a, b] or [a, b, obj] intervals");
 
         for (long i = 0 ; i < RARRAY_LEN(intervals) ; ++i)
         {
             VALUE interval = rb_check_array_type(rb_ary_entry(intervals, i));
-            if (NIL_P(interval) || RARRAY_LEN(interval) != 2)
-                rb_raise(rb_eArgError, "expected an [a, b] interval at index %ld", i);
-            rb_funcall(self, rb_intern("insert"), 2,
-                    rb_ary_entry(interval, 0), rb_ary_entry(interval, 1));
+            const long len = NIL_P(interval) ? 0 : RARRAY_LEN(interval);
+
+            if (len != 2 && len != 3)
+                rb_raise(rb_eArgError,
+                        "expected an [a, b] or [a, b, obj] interval at index %ld", i);
+
+            rb_funcall(self, rb_intern("insert"), 3,
+                    rb_ary_entry(interval, 0),
+                    rb_ary_entry(interval, 1),
+                    (len == 3) ? rb_ary_entry(interval, 2) : Qnil);
         }
     }
 
@@ -247,14 +306,17 @@ rb_dit_initialize(int argc, VALUE * argv, VALUE self)
 
 /* Insert `[a..b[`, returns `DIT_OK`, or raises unless `soft` is set */
 static dit_status_t
-rb_dit_do_insert(VALUE self, VALUE va, VALUE vb, int soft)
+rb_dit_do_insert(int argc, VALUE * argv, VALUE self, int soft)
 {
+    VALUE va, vb, vobj;
+    rb_scan_args(argc, argv, "21", &va, &vb, &vobj);
+
     dit_t * tree = rb_dit_get_mutable(self);
 
     const dit_value_t a = rb_dit_value(va);
     const dit_value_t b = rb_dit_value(vb);
 
-    const dit_status_t status = dit_insert(tree, a, b);
+    const dit_status_t status = dit_insert(tree, a, b, (dit_object_t) vobj);
 
     switch (status)
     {
@@ -287,9 +349,11 @@ rb_dit_do_insert(VALUE self, VALUE va, VALUE vb, int soft)
 
 /*
  *  call-seq:
- *      tree.insert(a, b) -> self
+ *      tree.insert(a, b)      -> self
+ *      tree.insert(a, b, obj) -> self
  *
- *  Insert the half-open interval `[a..b[`.
+ *  Insert the half-open interval `[a..b[`, associated with `obj` - which
+ *  defaults to nil, and which every query and traversal hands back.
  *
  *  It is a usage contract that `[a..b[` must not overlap an already inserted
  *  interval: an OverlapError is raised - and the tree is left unchanged - if
@@ -297,32 +361,33 @@ rb_dit_do_insert(VALUE self, VALUE va, VALUE vb, int soft)
  *  overlap.
  */
 static VALUE
-rb_dit_insert(VALUE self, VALUE va, VALUE vb)
+rb_dit_insert(int argc, VALUE * argv, VALUE self)
 {
-    rb_dit_do_insert(self, va, vb, 0);
+    rb_dit_do_insert(argc, argv, self, 0);
     return self;
 }
 
 /*
  *  call-seq:
- *      tree.insert?(a, b) -> true or false
+ *      tree.insert?(a, b)      -> true or false
+ *      tree.insert?(a, b, obj) -> true or false
  *
  *  Same as #insert, but returns false instead of raising when `[a..b[`
  *  overlaps an already inserted interval.
  */
 static VALUE
-rb_dit_insert_p(VALUE self, VALUE va, VALUE vb)
+rb_dit_insert_p(int argc, VALUE * argv, VALUE self)
 {
-    return (rb_dit_do_insert(self, va, vb, 1) == DIT_OK) ? Qtrue : Qfalse;
+    return (rb_dit_do_insert(argc, argv, self, 1) == DIT_OK) ? Qtrue : Qfalse;
 }
 
 /*
  *  call-seq:
- *      tree.intersect(a, b) { |x, y| ... } -> self
- *      tree.intersect(a, b)                -> array
+ *      tree.intersect(a, b) { |x, y, obj| ... } -> self
+ *      tree.intersect(a, b)                     -> array
  *
  *  Yield every stored interval intersecting `[a..b[`, in increasing order.
- *  Without a block, return them as an array of `[x, y]` pairs.
+ *  Without a block, return them as an array of `[x, y, obj]` triples.
  *
  *  The tree must not be modified from within the block.
  */
@@ -360,12 +425,12 @@ rb_dit_intersect_p(VALUE self, VALUE va, VALUE vb)
 
 /*
  *  call-seq:
- *      tree.remove(a, b)                    -> integer
- *      tree.remove(a, b) { |x, y| ... }     -> integer
+ *      tree.remove(a, b)                        -> integer
+ *      tree.remove(a, b) { |x, y, obj| ... }    -> integer
  *
  *  Remove every stored interval intersecting `[a..b[` and return how many were
- *  removed. If a block is given, it is called with each removed interval once
- *  the removal is done.
+ *  removed. If a block is given, it is called with each removed interval - and
+ *  its object - once the removal is done.
  *
  *  Intervals are removed as a whole: an interval only partially covered by
  *  `[a..b[` is removed entirely, never split.
@@ -387,7 +452,7 @@ rb_dit_remove(VALUE self, VALUE va, VALUE vb)
         rb_dit_traverse(tree, 0, a, b, rb_dit_cb_push, (void *) removed);
     }
 
-    const size_t n = dit_remove(tree, a, b);
+    const size_t n = dit_remove(tree, a, b, NULL, NULL);
 
     if (!NIL_P(removed))
     {
@@ -395,7 +460,10 @@ rb_dit_remove(VALUE self, VALUE va, VALUE vb)
         for (long i = 0 ; i < RARRAY_LEN(removed) ; ++i)
         {
             VALUE interval = rb_ary_entry(removed, i);
-            rb_yield_values(2, rb_ary_entry(interval, 0), rb_ary_entry(interval, 1));
+            rb_yield_values(3,
+                    rb_ary_entry(interval, 0),
+                    rb_ary_entry(interval, 1),
+                    rb_ary_entry(interval, 2));
         }
     }
 
@@ -412,8 +480,8 @@ rb_dit_enum_size(VALUE self, VALUE args, VALUE eobj)
 
 /*
  *  call-seq:
- *      tree.each { |a, b| ... } -> self
- *      tree.each                -> enumerator
+ *      tree.each { |a, b, obj| ... } -> self
+ *      tree.each                     -> enumerator
  *
  *  Yield every stored interval, in increasing order.
  */
@@ -433,7 +501,8 @@ rb_dit_each(VALUE self)
  *  call-seq:
  *      tree.to_a -> array
  *
- *  Every stored interval, in increasing order, as an array of `[a, b]` pairs.
+ *  Every stored interval, in increasing order, as an array of `[a, b, obj]`
+ *  triples.
  */
 static VALUE
 rb_dit_to_a(VALUE self)
@@ -446,7 +515,7 @@ rb_dit_to_a(VALUE self)
 
 /*
  *  call-seq:
- *      tree.at(x) -> [a, b] or nil
+ *      tree.at(x) -> [a, b, obj] or nil
  *
  *  The stored interval containing the point `x`, or nil. O(log n).
  */
@@ -455,7 +524,25 @@ rb_dit_at(VALUE self, VALUE vx)
 {
     const dit_t * tree = rb_dit_get(self);
     const dit_node_t * node = dit_at(tree, rb_dit_value(vx));
-    return node ? rb_dit_interval(node->a, node->b) : Qnil;
+    return node ? rb_dit_interval(node->a, node->b, node->obj) : Qnil;
+}
+
+/*
+ *  call-seq:
+ *      tree[x] -> obj or nil
+ *
+ *  The object of the stored interval containing the point `x`, or nil when no
+ *  interval covers it. O(log n).
+ *
+ *  A nil return is ambiguous: use #at or #cover? to tell "no interval here"
+ *  from "an interval whose object is nil".
+ */
+static VALUE
+rb_dit_aref(VALUE self, VALUE vx)
+{
+    const dit_t * tree = rb_dit_get(self);
+    const dit_node_t * node = dit_at(tree, rb_dit_value(vx));
+    return node ? (VALUE) node->obj : Qnil;
 }
 
 /*
@@ -489,7 +576,7 @@ rb_dit_hull(VALUE self)
     if (!dit_hull(tree, &a, &b))
         return Qnil;
 
-    return rb_dit_interval(a, b);
+    return rb_assoc_new(ULL2NUM(a), ULL2NUM(b));
 }
 
 /*
@@ -574,7 +661,8 @@ rb_dit_inspect(VALUE self)
  *  call-seq:
  *      tree.initialize_copy(other) -> self
  *
- *  Called by #dup and #clone.
+ *  Called by #dup and #clone. The copy is shallow: both trees end up sharing
+ *  the same objects.
  */
 static VALUE
 rb_dit_initialize_copy(VALUE self, VALUE other)
@@ -597,16 +685,44 @@ rb_dit_initialize_copy(VALUE self, VALUE other)
         VALUE interval = rb_ary_entry(intervals, i);
         const dit_value_t a = rb_dit_value(rb_ary_entry(interval, 0));
         const dit_value_t b = rb_dit_value(rb_ary_entry(interval, 1));
-        if (dit_insert(tree, a, b) != DIT_OK)
+
+        /* shallow copy: the two trees share the very same objects */
+        const dit_object_t obj = (dit_object_t) rb_ary_entry(interval, 2);
+
+        if (dit_insert(tree, a, b, obj) != DIT_OK)
             rb_raise(eError, "could not copy interval [%"PRIu64"..%"PRIu64"[", a, b);
     }
 
     return self;
 }
 
+/* A C extension is only loadable by the ruby ABI it was compiled against.
+ * Nothing in the `require` path enforces that for a plain `.so` sitting in a
+ * load path - it just gets dlopen'd - and the mismatch then shows up as memory
+ * corruption somewhere else entirely. Fail loudly instead.
+ *
+ * `ruby_api_version` is the running interpreter's, `RUBY_API_VERSION_*` the
+ * headers this file was compiled with */
+static void
+rb_dit_check_abi(void)
+{
+    if (ruby_api_version[0] == RUBY_API_VERSION_MAJOR &&
+        ruby_api_version[1] == RUBY_API_VERSION_MINOR)
+        return ;
+
+    rb_raise(rb_eLoadError,
+            "disjoint_interval_tree was compiled for ruby %d.%d but is being "
+            "loaded by ruby %d.%d. Rebuild the extension with that ruby: "
+            "`rake recompile`",
+            RUBY_API_VERSION_MAJOR, RUBY_API_VERSION_MINOR,
+            ruby_api_version[0], ruby_api_version[1]);
+}
+
 void
 Init_disjoint_interval_tree(void)
 {
+    rb_dit_check_abi();
+
     cTree = rb_define_class("DisjointIntervalTree", rb_cObject);
     rb_include_module(cTree, rb_mEnumerable);
 
@@ -623,14 +739,15 @@ Init_disjoint_interval_tree(void)
     rb_define_method(cTree, "initialize",      rb_dit_initialize,      -1);
     rb_define_method(cTree, "initialize_copy", rb_dit_initialize_copy,  1);
 
-    rb_define_method(cTree, "insert",      rb_dit_insert,       2);
-    rb_define_method(cTree, "insert?",     rb_dit_insert_p,     2);
+    rb_define_method(cTree, "insert",      rb_dit_insert,      -1);
+    rb_define_method(cTree, "insert?",     rb_dit_insert_p,    -1);
     rb_define_method(cTree, "intersect",  rb_dit_intersect,   2);
     rb_define_method(cTree, "intersect?", rb_dit_intersect_p, 2);
     rb_define_method(cTree, "remove",      rb_dit_remove,       2);
     rb_define_method(cTree, "each",        rb_dit_each,         0);
     rb_define_method(cTree, "to_a",        rb_dit_to_a,         0);
     rb_define_method(cTree, "at",          rb_dit_at,           1);
+    rb_define_method(cTree, "[]",          rb_dit_aref,         1);
     rb_define_method(cTree, "cover?",      rb_dit_cover_p,      1);
     rb_define_method(cTree, "hull",        rb_dit_hull,         0);
     rb_define_method(cTree, "size",        rb_dit_size,         0);

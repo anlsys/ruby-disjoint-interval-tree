@@ -23,20 +23,25 @@ require 'disjoint_interval_tree/version'
 # `[0 .. DisjointIntervalTree::MAX[`.
 #
 #     tree = DisjointIntervalTree.new
-#     tree.insert(0, 10)
-#     tree.insert(20, 30)
+#     tree.insert(0, 10, :first)
+#     tree.insert(20, 30, :second)
 #
-#     tree.intersect(5, 25) { |a, b| puts "[#{a}..#{b}[" }
-#     # => [0..10[
-#     # => [20..30[
+#     tree.intersect(5, 25) { |a, b, obj| puts "[#{a}..#{b}[ #{obj}" }
+#     # => [0..10[ first
+#     # => [20..30[ second
 #
+#     tree[5]             # => :first
 #     tree.remove(5, 25)  # => 2
 #     tree.to_a           # => []
+#
+# Each interval carries an object, given at insertion - it defaults to nil -
+# and handed back by every query and traversal.
 #
 # Inserting an interval overlapping an already inserted one is a usage
 # contract violation and raises DisjointIntervalTree::OverlapError.
 class DisjointIntervalTree
-  # Two trees are equal when they hold the same intervals.
+  # Two trees are equal when they hold the same intervals, associated with
+  # objects comparing equal.
   def ==(other)
     other.is_a?(DisjointIntervalTree) && to_a == other.to_a
   end

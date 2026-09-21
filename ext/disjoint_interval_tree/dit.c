@@ -107,7 +107,7 @@ dit_node_refresh_augment(dit_node_t * node)
 }
 
 static inline dit_node_t *
-dit_node_new(dit_value_t a, dit_value_t b)
+dit_node_new(dit_value_t a, dit_value_t b, dit_object_t obj)
 {
     DIT_ASSERT(a < b);
 
@@ -117,6 +117,7 @@ dit_node_new(dit_value_t a, dit_value_t b)
 
     node->a              = a;
     node->b              = b;
+    node->obj            = obj;
     node->left           = NULL;
     node->right          = NULL;
     node->augment.hull.a = a;
@@ -304,22 +305,23 @@ dit_insert_from(
     dit_node_t * node,
     dit_value_t a,
     dit_value_t b,
+    dit_object_t obj,
     dit_status_t * status
 ) {
     if (node == NULL)
     {
-        dit_node_t * created = dit_node_new(a, b);
+        dit_node_t * created = dit_node_new(a, b, obj);
         *status = created ? DIT_OK : DIT_NOMEM;
         return created;
     }
 
     /* case (1) - [a..b[ entirely before this node */
     if (b <= node->a)
-        node->left = dit_insert_from(node->left, a, b, status);
+        node->left = dit_insert_from(node->left, a, b, obj, status);
 
     /* case (2) - [a..b[ entirely after this node */
     else if (a >= node->b)
-        node->right = dit_insert_from(node->right, a, b, status);
+        node->right = dit_insert_from(node->right, a, b, obj, status);
 
     /* case (3) - contract violation, [a..b[ intersect this node */
     else
@@ -338,7 +340,7 @@ dit_insert_from(
 }
 
 dit_status_t
-dit_insert(dit_t * tree, dit_value_t a, dit_value_t b)
+dit_insert(dit_t * tree, dit_value_t a, dit_value_t b, dit_object_t obj)
 {
     DIT_ASSERT(tree);
     DIT_ASSERT(tree->traversing == 0 && "cannot mutate the tree while traversing it");
@@ -347,7 +349,7 @@ dit_insert(dit_t * tree, dit_value_t a, dit_value_t b)
         return DIT_EMPTY;
 
     dit_status_t status = DIT_OK;
-    dit_node_t * root = dit_insert_from(tree->root, a, b, &status);
+    dit_node_t * root = dit_insert_from(tree->root, a, b, obj, &status);
 
     if (status != DIT_OK)
         return status;
@@ -382,6 +384,37 @@ dit_intersecting_from(dit_node_t * node, dit_value_t a, dit_value_t b)
             return node;
         }
     }
+    return NULL;
+}
+
+/* Same, but always returning the *smallest* such interval. It cannot stop as
+ * soon as it finds a match, so it always walks a full root-to-leaf path -
+ * still O(log n), just without the early exit */
+static inline dit_node_t *
+dit_leftmost_intersecting_from(dit_node_t * node, dit_value_t a, dit_value_t b)
+{
+    dit_node_t * leftmost = NULL;
+
+    /* leftmost node ending after `a`. Intervals being disjoint and ordered,
+     * those intersecting [a..b[ form a contiguous run, so that node is the
+     * first of the run - when it starts before `b` */
+    while (node)
+    {
+        if (node->b > a)
+        {
+            leftmost = node;
+            node = node->left;
+        }
+        else
+            node = node->right;
+    }
+
+    if (leftmost && leftmost->a < b)
+    {
+        DIT_ASSERT(DIT_INTERSECTS(a, b, leftmost->a, leftmost->b));
+        return leftmost;
+    }
+
     return NULL;
 }
 
@@ -440,7 +473,7 @@ dit_intersect_from(
 
     if (DIT_INTERSECTS(a, b, node->a, node->b))
     {
-        if ((r = cb(node->a, node->b, user)) != 0)
+        if ((r = cb(node->a, node->b, node->obj, user)) != 0)
             return r;
     }
 
@@ -476,7 +509,7 @@ dit_each_from(dit_node_t * node, dit_cb_t cb, void * user)
     if ((r = dit_each_from(node->left, cb, user)) != 0)
         return r;
 
-    if ((r = cb(node->a, node->b, user)) != 0)
+    if ((r = cb(node->a, node->b, node->obj, user)) != 0)
         return r;
 
     return dit_each_from(node->right, cb, user);
@@ -545,15 +578,20 @@ dit_remove_from(dit_node_t * node, dit_value_t key)
         }
 
         /* two children: replace the interval with its in-order successor's,
-         * then remove that successor from the right subtree */
+         * then remove that successor from the right subtree.
+         *
+         * The object travels with the interval it belongs to: forgetting it
+         * here would silently hand the successor's interval the object of the
+         * node being deleted */
         dit_node_t * successor;
         node->right = dit_detach_min(node->right, &successor);
 
         DIT_ASSERT(successor && successor->left == NULL);
         DIT_ASSERT(node->a < successor->a);
 
-        node->a = successor->a;
-        node->b = successor->b;
+        node->a   = successor->a;
+        node->b   = successor->b;
+        node->obj = successor->obj;
 
         DIT_FREE(successor);
     }
@@ -563,7 +601,7 @@ dit_remove_from(dit_node_t * node, dit_value_t key)
 }
 
 size_t
-dit_remove(dit_t * tree, dit_value_t a, dit_value_t b)
+dit_remove(dit_t * tree, dit_value_t a, dit_value_t b, dit_cb_t cb, void * user)
 {
     DIT_ASSERT(tree);
     DIT_ASSERT(tree->traversing == 0 && "cannot mutate the tree while traversing it");
@@ -573,12 +611,22 @@ dit_remove(dit_t * tree, dit_value_t a, dit_value_t b)
 
     size_t n = 0;
 
-    /* each iteration is a O(log n) descent plus a O(log n) deletion */
+    /* each iteration is a O(log n) descent plus a O(log n) deletion. Removing
+     * the smallest match every time reports them in increasing order */
     for (;;)
     {
-        dit_node_t * node = dit_intersecting_from(tree->root, a, b);
+        dit_node_t * node = dit_leftmost_intersecting_from(tree->root, a, b);
         if (node == NULL)
             break ;
+
+        if (cb)
+        {
+            /* the callback may read the tree, but not mutate it: it would
+             * free the very node about to be deleted */
+            tree->traversing += 1;
+            cb(node->a, node->b, node->obj, user);
+            tree->traversing -= 1;
+        }
 
         tree->root = dit_remove_from(tree->root, node->a);
 
@@ -821,6 +869,7 @@ dit_dump_dot_from(const dit_node_t * node, FILE * f)
 
     fprintf(f, "    N%p[shape=record, label=\"{[%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[",
             (const void *) node, node->a, node->b);
+    fprintf(f, "|obj %p", (const void *) (uintptr_t) node->obj);
     fprintf(f, "|hull [%" DIT_VALUE_FMT "..%" DIT_VALUE_FMT "[",
             node->augment.hull.a, node->augment.hull.b);
     fprintf(f, "|h=%d, n=%u}\"] ;\n", (int) node->augment.height, node->augment.size);

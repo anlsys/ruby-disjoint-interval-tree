@@ -20,10 +20,18 @@ NPROC     = Etc.respond_to?(:nprocessors) ? Etc.nprocessors : 4
 VERSION   = DisjointIntervalTree::VERSION
 GEM_FILE  = File.expand_path("pkg/#{EXT_NAME}-#{VERSION}.gem", __dir__)
 
+# `lib/` holds a single .so, but a C extension only ever works with the ruby
+# ABI it was compiled against: switching ruby - system, spack, rbenv, a CI
+# matrix - has to force a rebuild. Loading the wrong one is not a clean
+# failure, it corrupts memory and crashes somewhere else entirely.
+BUILD_ID_PATH = File.join(LIB_DIR, '.build-id')
+BUILD_ID      = [RUBY_ENGINE, RbConfig::CONFIG['ruby_version'], RUBY_PLATFORM,
+                 (ENV['EXTOPTS'] || '')].join(' ')
+
 SOURCES = FileList["#{EXT_DIR}/*.c", "#{EXT_DIR}/*.h", "#{EXT_DIR}/extconf.rb"]
 
 CLEAN.include('tmp')
-CLOBBER.include(SO_PATH, 'pkg')
+CLOBBER.include(SO_PATH, BUILD_ID_PATH, 'pkg')
 
 # Number of distinct RNG seeds the randomized tests are replayed with by
 # `rake verify`. Both suites take a seed, and those randomized cross-checks
@@ -37,6 +45,37 @@ EXTOPTS = (ENV['EXTOPTS'] || '').split
 directory BUILD_DIR
 directory LIB_DIR
 
+# Building needs the ruby development headers. Without them mkmf fails deep in
+# the build log with a message about the wrong directory, so say it up front.
+task :check_headers do
+  header = File.join(RbConfig::CONFIG['rubyhdrdir'].to_s, 'ruby.h')
+  next if File.exist?(header)
+
+  abort <<~MSG
+    #{RUBY_BIN} has no development headers (no #{header}).
+
+    Install them, or build with a ruby that has them:
+      debian/ubuntu : sudo apt install ruby-dev
+      spack         : spack load ruby
+  MSG
+end
+
+# Drop an extension built by another ruby rather than letting it be loaded
+task check_build_id: [LIB_DIR, :check_headers] do
+  next if File.exist?(BUILD_ID_PATH) && File.read(BUILD_ID_PATH) == BUILD_ID
+
+  if File.exist?(SO_PATH)
+    puts "#{SO_NAME} was built by another ruby (#{begin
+      File.read(BUILD_ID_PATH)
+    rescue StandardError
+      'unknown'
+    end}), rebuilding for #{BUILD_ID}"
+  end
+
+  FileUtils.rm_f(SO_PATH)
+  File.write(BUILD_ID_PATH, BUILD_ID)
+end
+
 file SO_PATH => SOURCES + [BUILD_DIR, LIB_DIR] do
   Dir.chdir(BUILD_DIR) do
     sh(RUBY_BIN, File.join(EXT_DIR, 'extconf.rb'), *EXTOPTS)
@@ -45,16 +84,21 @@ file SO_PATH => SOURCES + [BUILD_DIR, LIB_DIR] do
   FileUtils.cp(File.join(BUILD_DIR, SO_NAME), SO_PATH, verbose: true)
 end
 
+# The checks come first, as prerequisites rather than as prerequisites of
+# SO_PATH itself: a basic rake task timestamps as `Time.now`, so depending on
+# one would make the file task look out of date on every single run
 desc 'Build the C extension'
-task compile: SO_PATH
+task compile: [:check_headers, :check_build_id, SO_PATH]
 
 # `clean` alone would not be enough: rake never considers a file task out of
 # date because of a directory prerequisite, so the stale .so has to go
 desc 'Rebuild the C extension from scratch'
 task :recompile do
+  Rake::Task[:check_headers].invoke
   Rake::Task[:clean].invoke
   FileUtils.rm_f(SO_PATH)
   [BUILD_DIR, LIB_DIR, SO_PATH].each { |t| Rake::Task[t].reenable }
+  Rake::Task[:check_build_id].invoke
   Rake::Task[SO_PATH].invoke
 end
 
@@ -110,8 +154,9 @@ namespace :test do
       path = Gem.loaded_specs['disjoint_interval_tree'].full_gem_path
       raise "loaded \#{path}, expected it under #{GEM_DIR}" unless path.start_with?('#{GEM_DIR}')
 
-      tree = DisjointIntervalTree.new([[0, 10], [20, 30]])
-      raise 'unexpected content' unless tree.intersect(5, 25) == [[0, 10], [20, 30]]
+      tree = DisjointIntervalTree.new([[0, 10, :first], [20, 30]])
+      raise 'unexpected content' unless tree.intersect(5, 25) == [[0, 10, :first], [20, 30, nil]]
+      raise 'unexpected object' unless tree[5] == :first
       raise 'unexpected removal' unless tree.remove(5, 25) == 2
       tree.check!
 

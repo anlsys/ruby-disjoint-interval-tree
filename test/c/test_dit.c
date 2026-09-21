@@ -83,6 +83,19 @@ static const char * current_test = NULL;
         printf("%s\n", (tests_failed == __before) ? "ok" : "FAILED");       \
     } while (0)
 
+///////////////////////
+// OBJECT CONVENTION //
+///////////////////////
+
+/* Every interval of the test suite carries an object derived from its lower
+ * bound, so that any node whose object went astray - most likely the deletion
+ * of a node with two children, which moves an interval from one node to
+ * another - is caught the moment it is reported.
+ *
+ * `+1` keeps the object of [0..b[ distinguishable from a NULL object */
+#define OBJ(A)          ((dit_object_t) (uintptr_t) ((A) + 1))
+#define OBJ_MATCHES(O, A) ((O) == OBJ(A))
+
 ////////////////////////////
 // REFERENCE (NAIVE) MODEL //
 ////////////////////////////
@@ -92,6 +105,7 @@ static const char * current_test = NULL;
 typedef struct
 {
     dit_value_t a, b;
+    dit_object_t obj;
 }   interval_t;
 
 #define MODEL_CAPACITY 4096
@@ -136,8 +150,9 @@ model_insert(model_t * m, dit_value_t a, dit_value_t b)
         m->intervals[i] = m->intervals[i - 1];
         --i;
     }
-    m->intervals[i].a = a;
-    m->intervals[i].b = b;
+    m->intervals[i].a   = a;
+    m->intervals[i].b   = b;
+    m->intervals[i].obj = OBJ(a);
     ++m->n;
 
     return 1;
@@ -175,6 +190,9 @@ typedef struct
 
     /* stop the traversal after that many intervals, 0 to never stop */
     size_t stop_after;
+
+    /* number of intervals whose object was not the expected one */
+    size_t bad_objects;
 }   collect_t;
 
 static void
@@ -182,10 +200,11 @@ collect_init(collect_t * c)
 {
     c->n = 0;
     c->stop_after = 0;
+    c->bad_objects = 0;
 }
 
 static int
-collect_cb(dit_value_t a, dit_value_t b, void * user)
+collect_cb(dit_value_t a, dit_value_t b, dit_object_t obj, void * user)
 {
     collect_t * c = (collect_t *) user;
 
@@ -195,15 +214,83 @@ collect_cb(dit_value_t a, dit_value_t b, void * user)
         abort();
     }
 
-    c->intervals[c->n].a = a;
-    c->intervals[c->n].b = b;
+    c->intervals[c->n].a   = a;
+    c->intervals[c->n].b   = b;
+    c->intervals[c->n].obj = obj;
     ++c->n;
+
+    if (!OBJ_MATCHES(obj, a))
+        ++c->bad_objects;
 
     if (c->stop_after && c->n >= c->stop_after)
         return 42;
 
     return 0;
 }
+
+/////////////////////////
+// VERIFYING CALLBACK  //
+/////////////////////////
+
+/* Same checks as the collector, without the storage: for trees holding more
+ * than MODEL_CAPACITY intervals */
+
+typedef struct
+{
+    size_t n;
+    size_t bad_objects;
+    size_t out_of_order;
+    dit_value_t prev_b;
+    int has_prev;
+}   verify_t;
+
+static void
+verify_init(verify_t * v)
+{
+    v->n            = 0;
+    v->bad_objects  = 0;
+    v->out_of_order = 0;
+    v->prev_b       = 0;
+    v->has_prev     = 0;
+}
+
+static int
+verify_cb(dit_value_t a, dit_value_t b, dit_object_t obj, void * user)
+{
+    verify_t * v = (verify_t *) user;
+
+    if (!OBJ_MATCHES(obj, a))
+        ++v->bad_objects;
+
+    if (v->has_prev && v->prev_b > a)
+        ++v->out_of_order;
+
+    v->prev_b   = b;
+    v->has_prev = 1;
+    ++v->n;
+
+    return 0;
+}
+
+#define ASSERT_VERIFIED(V)                                                  \
+    do {                                                                    \
+        ++checks_run;                                                       \
+        if ((V)->bad_objects)                                               \
+            FAIL("%zu of the %zu reported intervals carried a wrong object",\
+                    (V)->bad_objects, (V)->n);                              \
+        if ((V)->out_of_order)                                              \
+            FAIL("%zu of the %zu reported intervals were out of order",     \
+                    (V)->out_of_order, (V)->n);                             \
+    } while (0)
+
+/* every reported interval carried the object it was inserted with */
+#define ASSERT_OBJECTS_OK(C)                                                \
+    do {                                                                    \
+        ++checks_run;                                                       \
+        if ((C)->bad_objects)                                               \
+            FAIL("%zu of the %zu reported intervals carried a wrong object",\
+                    (C)->bad_objects, (C)->n);                              \
+    } while (0)
 
 ///////////
 // TESTS //
@@ -222,7 +309,7 @@ test_empty(void)
     ASSERT(dit_at(&tree, 0) == NULL);
     ASSERT(dit_intersecting(&tree, 0, 100) == NULL);
     ASSERT_EQ(dit_intersect_p(&tree, 0, 100), 0);
-    ASSERT_EQ(dit_remove(&tree, 0, 100), 0);
+    ASSERT_EQ(dit_remove(&tree, 0, 100, NULL, NULL), 0);
 
     /* an empty tree has no hull, and the out params are left untouched */
     dit_value_t ha = 42;
@@ -247,11 +334,12 @@ test_insert_single(void)
     dit_t tree;
     dit_init(&tree);
 
-    ASSERT_EQ(dit_insert(&tree, 10, 20), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 10, 20, OBJ(10)), DIT_OK);
     ASSERT_COHERENT(&tree);
     ASSERT_EQ(dit_size(&tree), 1);
     ASSERT_EQ(dit_empty(&tree), 0);
     ASSERT_EQ(dit_height(&tree), 1);
+    ASSERT(tree.root->obj == OBJ(10));
 
     /* the hull of a single node is the node interval itself */
     ASSERT_EQ(tree.root->augment.hull.a, 10);
@@ -274,8 +362,8 @@ test_insert_empty_interval(void)
     dit_t tree;
     dit_init(&tree);
 
-    ASSERT_EQ(dit_insert(&tree, 10, 10), DIT_EMPTY);
-    ASSERT_EQ(dit_insert(&tree, 20, 10), DIT_EMPTY);
+    ASSERT_EQ(dit_insert(&tree, 10, 10, OBJ(10)), DIT_EMPTY);
+    ASSERT_EQ(dit_insert(&tree, 20, 10, OBJ(20)), DIT_EMPTY);
     ASSERT_EQ(dit_size(&tree), 0);
     ASSERT_COHERENT(&tree);
 
@@ -288,25 +376,25 @@ test_insert_overlap_is_rejected(void)
     dit_t tree;
     dit_init(&tree);
 
-    ASSERT_EQ(dit_insert(&tree, 10, 20), DIT_OK);
-    ASSERT_EQ(dit_insert(&tree, 30, 40), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 10, 20, OBJ(10)), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 30, 40, OBJ(30)), DIT_OK);
 
     /* every flavour of overlap */
-    ASSERT_EQ(dit_insert(&tree, 10, 20), DIT_OVERLAP);  /* identical         */
-    ASSERT_EQ(dit_insert(&tree, 12, 18), DIT_OVERLAP);  /* strictly included */
-    ASSERT_EQ(dit_insert(&tree,  5, 25), DIT_OVERLAP);  /* strictly includes */
-    ASSERT_EQ(dit_insert(&tree,  5, 11), DIT_OVERLAP);  /* overlaps the left */
-    ASSERT_EQ(dit_insert(&tree, 19, 25), DIT_OVERLAP);  /* overlaps the right*/
-    ASSERT_EQ(dit_insert(&tree,  0, 35), DIT_OVERLAP);  /* spans both        */
+    ASSERT_EQ(dit_insert(&tree, 10, 20, OBJ(10)), DIT_OVERLAP);  /* identical         */
+    ASSERT_EQ(dit_insert(&tree, 12, 18, OBJ(12)), DIT_OVERLAP);  /* strictly included */
+    ASSERT_EQ(dit_insert(&tree,  5, 25, OBJ( 5)), DIT_OVERLAP);  /* strictly includes */
+    ASSERT_EQ(dit_insert(&tree,  5, 11, OBJ( 5)), DIT_OVERLAP);  /* overlaps the left */
+    ASSERT_EQ(dit_insert(&tree, 19, 25, OBJ(19)), DIT_OVERLAP);  /* overlaps the right*/
+    ASSERT_EQ(dit_insert(&tree,  0, 35, OBJ( 0)), DIT_OVERLAP);  /* spans both        */
 
     /* and the tree was left untouched */
     ASSERT_EQ(dit_size(&tree), 2);
     ASSERT_COHERENT(&tree);
 
     /* adjacent intervals do not overlap */
-    ASSERT_EQ(dit_insert(&tree,  0, 10), DIT_OK);
-    ASSERT_EQ(dit_insert(&tree, 20, 30), DIT_OK);
-    ASSERT_EQ(dit_insert(&tree, 40, 50), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree,  0, 10, OBJ( 0)), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 20, 30, OBJ(20)), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 40, 50, OBJ(40)), DIT_OK);
     ASSERT_EQ(dit_size(&tree), 5);
     ASSERT_COHERENT(&tree);
 
@@ -322,7 +410,7 @@ test_ordering(void)
     /* inserted out of order */
     const dit_value_t starts[] = { 50, 10, 90, 30, 70, 0, 20 };
     for (size_t i = 0 ; i < sizeof(starts) / sizeof(*starts) ; ++i)
-        ASSERT_EQ(dit_insert(&tree, starts[i], starts[i] + 5), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, starts[i], starts[i] + 5, OBJ(starts[i])), DIT_OK);
     ASSERT_COHERENT(&tree);
 
     collect_t c;
@@ -349,40 +437,40 @@ test_hull_augment(void)
 
     dit_value_t a, b;
 
-    ASSERT_EQ(dit_insert(&tree, 100, 110), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 100, 110, OBJ(100)), DIT_OK);
     ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
     ASSERT_EQ(a, 100);
     ASSERT_EQ(b, 110);
 
     /* growing on the left moves the lower bound only */
-    ASSERT_EQ(dit_insert(&tree, 10, 20), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 10, 20, OBJ(10)), DIT_OK);
     ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
     ASSERT_EQ(a, 10);
     ASSERT_EQ(b, 110);
 
     /* growing on the right moves the upper bound only */
-    ASSERT_EQ(dit_insert(&tree, 200, 210), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 200, 210, OBJ(200)), DIT_OK);
     ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
     ASSERT_EQ(a, 10);
     ASSERT_EQ(b, 210);
 
     /* inserting in between changes nothing */
-    ASSERT_EQ(dit_insert(&tree, 50, 60), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 50, 60, OBJ(50)), DIT_OK);
     ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
     ASSERT_EQ(a, 10);
     ASSERT_EQ(b, 210);
 
     /* enough insertions to trigger rotations at the root */
     for (dit_value_t i = 0 ; i < 64 ; ++i)
-        ASSERT_EQ(dit_insert(&tree, 1000 + 10 * i, 1000 + 10 * i + 5), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 1000 + 10 * i, 1000 + 10 * i + 5, OBJ(1000 + 10 * i)), DIT_OK);
     ASSERT_COHERENT(&tree);
     ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
     ASSERT_EQ(a, 10);
     ASSERT_EQ(b, 1635);
 
     /* the hull shrinks back when the extremities are removed */
-    ASSERT_EQ(dit_remove(&tree, 10, 20), 1);
-    ASSERT_EQ(dit_remove(&tree, 1630, 1635), 1);
+    ASSERT_EQ(dit_remove(&tree, 10, 20, NULL, NULL), 1);
+    ASSERT_EQ(dit_remove(&tree, 1630, 1635, NULL, NULL), 1);
     ASSERT_COHERENT(&tree);
     ASSERT_EQ(dit_hull(&tree, &a, &b), 1);
     ASSERT_EQ(a, 50);
@@ -411,7 +499,7 @@ test_intersect(void)
 
     /* [0..10[ [20..30[ [40..50[ [60..70[ */
     for (dit_value_t i = 0 ; i < 4 ; ++i)
-        ASSERT_EQ(dit_insert(&tree, 20 * i, 20 * i + 10), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 20 * i, 20 * i + 10, OBJ(20 * i)), DIT_OK);
     ASSERT_COHERENT(&tree);
 
     collect_t c;
@@ -468,7 +556,7 @@ test_intersect_early_stop(void)
     dit_init(&tree);
 
     for (dit_value_t i = 0 ; i < 100 ; ++i)
-        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5, OBJ(10 * i)), DIT_OK);
 
     collect_t c;
     collect_init(&c);
@@ -496,34 +584,34 @@ test_remove(void)
 
     /* [0..10[ [20..30[ [40..50[ [60..70[ */
     for (dit_value_t i = 0 ; i < 4 ; ++i)
-        ASSERT_EQ(dit_insert(&tree, 20 * i, 20 * i + 10), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 20 * i, 20 * i + 10, OBJ(20 * i)), DIT_OK);
 
     /* removing a hole removes nothing */
-    ASSERT_EQ(dit_remove(&tree, 10, 20), 0);
+    ASSERT_EQ(dit_remove(&tree, 10, 20, NULL, NULL), 0);
     ASSERT_EQ(dit_size(&tree), 4);
     ASSERT_COHERENT(&tree);
 
     /* intervals are removed as a whole, never split */
-    ASSERT_EQ(dit_remove(&tree, 25, 26), 1);
+    ASSERT_EQ(dit_remove(&tree, 25, 26, NULL, NULL), 1);
     ASSERT_EQ(dit_size(&tree), 3);
     ASSERT(dit_at(&tree, 20) == NULL);
     ASSERT(dit_at(&tree, 29) == NULL);
     ASSERT_COHERENT(&tree);
 
     /* removing a range spanning several intervals */
-    ASSERT_EQ(dit_remove(&tree, 5, 45), 2);
+    ASSERT_EQ(dit_remove(&tree, 5, 45, NULL, NULL), 2);
     ASSERT_EQ(dit_size(&tree), 1);
     ASSERT(dit_at(&tree, 65) != NULL);
     ASSERT_COHERENT(&tree);
 
     /* removing everything */
-    ASSERT_EQ(dit_remove(&tree, 0, 1000), 1);
+    ASSERT_EQ(dit_remove(&tree, 0, 1000, NULL, NULL), 1);
     ASSERT_EQ(dit_size(&tree), 0);
     ASSERT(dit_empty(&tree));
     ASSERT_COHERENT(&tree);
 
     /* removing from an empty tree */
-    ASSERT_EQ(dit_remove(&tree, 0, 1000), 0);
+    ASSERT_EQ(dit_remove(&tree, 0, 1000, NULL, NULL), 0);
     ASSERT_COHERENT(&tree);
 
     dit_destroy(&tree);
@@ -536,24 +624,24 @@ test_remove_reinsert(void)
     dit_init(&tree);
 
     for (dit_value_t i = 0 ; i < 256 ; ++i)
-        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5, OBJ(10 * i)), DIT_OK);
     ASSERT_COHERENT(&tree);
 
     /* remove every other interval */
     for (dit_value_t i = 0 ; i < 256 ; i += 2)
-        ASSERT_EQ(dit_remove(&tree, 10 * i, 10 * i + 5), 1);
+        ASSERT_EQ(dit_remove(&tree, 10 * i, 10 * i + 5, NULL, NULL), 1);
     ASSERT_EQ(dit_size(&tree), 128);
     ASSERT_COHERENT(&tree);
 
     /* the removed slots are now free again */
     for (dit_value_t i = 0 ; i < 256 ; i += 2)
-        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5, OBJ(10 * i)), DIT_OK);
     ASSERT_EQ(dit_size(&tree), 256);
     ASSERT_COHERENT(&tree);
 
     /* the others are not */
     for (dit_value_t i = 1 ; i < 256 ; i += 2)
-        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5), DIT_OVERLAP);
+        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5, OBJ(10 * i)), DIT_OVERLAP);
     ASSERT_COHERENT(&tree);
 
     dit_destroy(&tree);
@@ -566,7 +654,7 @@ test_clear(void)
     dit_init(&tree);
 
     for (dit_value_t i = 0 ; i < 100 ; ++i)
-        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5, OBJ(10 * i)), DIT_OK);
 
     dit_clear(&tree);
     ASSERT(dit_empty(&tree));
@@ -574,7 +662,7 @@ test_clear(void)
     ASSERT_COHERENT(&tree);
 
     /* the tree is reusable */
-    ASSERT_EQ(dit_insert(&tree, 0, 1000), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 0, 1000, OBJ(0)), DIT_OK);
     ASSERT_EQ(dit_size(&tree), 1);
     ASSERT_COHERENT(&tree);
 
@@ -591,7 +679,7 @@ test_balance_sorted_insertions(void)
     const dit_value_t n = 4095;
 
     for (dit_value_t i = 0 ; i < n ; ++i)
-        ASSERT_EQ(dit_insert(&tree, 2 * i, 2 * i + 1), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 2 * i, 2 * i + 1, OBJ(2 * i)), DIT_OK);
 
     ASSERT_EQ(dit_size(&tree), n);
     ASSERT_COHERENT(&tree);
@@ -603,7 +691,7 @@ test_balance_sorted_insertions(void)
     /* and reverse sorted insertions too */
     dit_clear(&tree);
     for (dit_value_t i = n ; i > 0 ; --i)
-        ASSERT_EQ(dit_insert(&tree, 2 * i, 2 * i + 1), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 2 * i, 2 * i + 1, OBJ(2 * i)), DIT_OK);
     ASSERT_EQ(dit_size(&tree), n);
     ASSERT(dit_height(&tree) <= 18);
     ASSERT_COHERENT(&tree);
@@ -611,7 +699,7 @@ test_balance_sorted_insertions(void)
     /* sequential deletions from the left */
     for (dit_value_t i = 1 ; i <= n ; ++i)
     {
-        ASSERT_EQ(dit_remove(&tree, 2 * i, 2 * i + 1), 1);
+        ASSERT_EQ(dit_remove(&tree, 2 * i, 2 * i + 1, NULL, NULL), 1);
         ASSERT_EQ(dit_size(&tree), n - i);
     }
     ASSERT(dit_empty(&tree));
@@ -627,9 +715,9 @@ test_extreme_values(void)
     dit_t tree;
     dit_init(&tree);
 
-    ASSERT_EQ(dit_insert(&tree, 0, 1), DIT_OK);
-    ASSERT_EQ(dit_insert(&tree, DIT_VALUE_MAX - 1, DIT_VALUE_MAX), DIT_OK);
-    ASSERT_EQ(dit_insert(&tree, 1, DIT_VALUE_MAX - 1), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 0, 1, OBJ(0)), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, DIT_VALUE_MAX - 1, DIT_VALUE_MAX, OBJ(DIT_VALUE_MAX - 1)), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 1, DIT_VALUE_MAX - 1, OBJ(1)), DIT_OK);
     ASSERT_COHERENT(&tree);
 
     ASSERT_EQ(tree.root->augment.hull.a, 0);
@@ -645,7 +733,7 @@ test_extreme_values(void)
     dit_intersect(&tree, 0, DIT_VALUE_MAX, collect_cb, &c);
     ASSERT_EQ(c.n, 3);
 
-    ASSERT_EQ(dit_remove(&tree, 0, DIT_VALUE_MAX), 3);
+    ASSERT_EQ(dit_remove(&tree, 0, DIT_VALUE_MAX, NULL, NULL), 3);
     ASSERT(dit_empty(&tree));
     ASSERT_COHERENT(&tree);
 
@@ -662,7 +750,7 @@ test_check_detects_corruption(void)
     dit_init(&tree);
 
     for (dit_value_t i = 0 ; i < 32 ; ++i)
-        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5, OBJ(10 * i)), DIT_OK);
     ASSERT_EQ(dit_check(&tree, err, sizeof(err)), 0);
 
     /* corrupt the cardinality */
@@ -721,7 +809,7 @@ test_dump_dot(void)
     dit_dump_dot(&tree, f);
 
     for (dit_value_t i = 0 ; i < 16 ; ++i)
-        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5), DIT_OK);
+        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5, OBJ(10 * i)), DIT_OK);
 
     dit_dump_dot(&tree, f);
     dit_dump_dot(NULL, f);
@@ -729,6 +817,137 @@ test_dump_dot(void)
     fclose(f);
 
     ASSERT_COHERENT(&tree);
+    dit_destroy(&tree);
+}
+
+/////////////
+// OBJECTS //
+/////////////
+
+static void
+test_objects(void)
+{
+    dit_t tree;
+    dit_init(&tree);
+
+    int one, two, three;
+
+    ASSERT_EQ(dit_insert(&tree, 0, 10, &one), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 20, 30, &two), DIT_OK);
+    ASSERT_EQ(dit_insert(&tree, 40, 50, &three), DIT_OK);
+    ASSERT_COHERENT(&tree);
+
+    /* point and range lookups hand the object back */
+    ASSERT(dit_at(&tree, 5)->obj == &one);
+    ASSERT(dit_at(&tree, 25)->obj == &two);
+    ASSERT(dit_at(&tree, 49)->obj == &three);
+    ASSERT(dit_intersecting(&tree, 5, 45)->obj != NULL);
+
+    /* a NULL object is a legitimate object */
+    ASSERT_EQ(dit_insert(&tree, 60, 70, NULL), DIT_OK);
+    ASSERT(dit_at(&tree, 65) != NULL);
+    ASSERT(dit_at(&tree, 65)->obj == NULL);
+
+    /* two intervals may share the same object */
+    ASSERT_EQ(dit_insert(&tree, 80, 90, &one), DIT_OK);
+    ASSERT(dit_at(&tree, 85)->obj == &one);
+    ASSERT(dit_at(&tree, 5)->obj == &one);
+
+    /* an object survives the removal of its neighbours */
+    ASSERT_EQ(dit_remove(&tree, 20, 30, NULL, NULL), 1);
+    ASSERT_EQ(dit_remove(&tree, 40, 50, NULL, NULL), 1);
+    ASSERT_COHERENT(&tree);
+    ASSERT(dit_at(&tree, 5)->obj == &one);
+    ASSERT(dit_at(&tree, 85)->obj == &one);
+    ASSERT(dit_at(&tree, 65)->obj == NULL);
+
+    dit_destroy(&tree);
+}
+
+/* The object must travel with its interval when a node with two children is
+ * deleted: that deletion moves the in-order successor's interval into the
+ * deleted node, and the object has to move with it */
+static void
+test_objects_survive_deletions(void)
+{
+    dit_t tree;
+    dit_init(&tree);
+
+    const dit_value_t n = 512;
+
+    for (dit_value_t i = 0 ; i < n ; ++i)
+        ASSERT_EQ(dit_insert(&tree, 10 * i, 10 * i + 5, OBJ(10 * i)), DIT_OK);
+
+    verify_t v;
+    verify_init(&v);
+    dit_each(&tree, verify_cb, &v);
+    ASSERT_VERIFIED(&v);
+    ASSERT_EQ(v.n, n);
+
+    /* delete in an order that maximizes two-children deletions: always the
+     * interval sitting at the root */
+    while (!dit_empty(&tree))
+    {
+        const dit_value_t a = tree.root->a;
+
+        if (tree.root->obj != OBJ(a))
+            FAIL("the root of the tree holds the object of another interval");
+
+        ASSERT_EQ(dit_remove(&tree, a, a + 1, NULL, NULL), 1);
+
+        verify_init(&v);
+        dit_each(&tree, verify_cb, &v);
+        if (v.bad_objects)
+            FAIL("%zu intervals carried a wrong object after removing "
+                 "[%" PRIu64 "..%" PRIu64 "[", v.bad_objects, a, a + 5);
+        if (v.n != dit_size(&tree))
+            FAIL("the traversal reported %zu of the %zu remaining intervals",
+                    v.n, dit_size(&tree));
+    }
+
+    ASSERT_COHERENT(&tree);
+    dit_destroy(&tree);
+}
+
+static void
+test_remove_callback(void)
+{
+    dit_t tree;
+    dit_init(&tree);
+
+    /* [0..10[ [20..30[ [40..50[ [60..70[ */
+    for (dit_value_t i = 0 ; i < 4 ; ++i)
+        ASSERT_EQ(dit_insert(&tree, 20 * i, 20 * i + 10, OBJ(20 * i)), DIT_OK);
+
+    collect_t c;
+
+    /* nothing removed, nothing reported */
+    collect_init(&c);
+    ASSERT_EQ(dit_remove(&tree, 10, 20, collect_cb, &c), 0);
+    ASSERT_EQ(c.n, 0);
+
+    /* every removed interval is reported once, in increasing order, with its
+     * object, before the node is freed */
+    collect_init(&c);
+    ASSERT_EQ(dit_remove(&tree, 5, 45, collect_cb, &c), 3);
+    ASSERT_EQ(c.n, 3);
+    ASSERT_OBJECTS_OK(&c);
+    ASSERT_EQ(c.intervals[0].a, 0);
+    ASSERT_EQ(c.intervals[1].a, 20);
+    ASSERT_EQ(c.intervals[2].a, 40);
+    ASSERT(c.intervals[0].obj == OBJ(0));
+    ASSERT(c.intervals[1].obj == OBJ(20));
+    ASSERT(c.intervals[2].obj == OBJ(40));
+    ASSERT_COHERENT(&tree);
+    ASSERT_EQ(dit_size(&tree), 1);
+
+    /* a removal cannot be interrupted: the callback return value is ignored */
+    collect_init(&c);
+    c.stop_after = 1;
+    ASSERT_EQ(dit_remove(&tree, 0, 1000, collect_cb, &c), 1);
+    ASSERT(dit_empty(&tree));
+    ASSERT_COHERENT(&tree);
+
     dit_destroy(&tree);
 }
 
@@ -783,9 +1002,13 @@ same_as_model(dit_t * tree, const model_t * m, collect_t * c)
     if (c->n != m->n)
         return 0;
 
+    if (c->bad_objects)
+        return 0;
+
     for (size_t i = 0 ; i < m->n ; ++i)
-        if (c->intervals[i].a != m->intervals[i].a ||
-            c->intervals[i].b != m->intervals[i].b)
+        if (c->intervals[i].a   != m->intervals[i].a ||
+            c->intervals[i].b   != m->intervals[i].b ||
+            c->intervals[i].obj != m->intervals[i].obj)
             return 0;
 
     return 1;
@@ -817,7 +1040,7 @@ test_random_against_model(void)
             case 0:
             {
                 const int insertable = !model_intersect(&model, a, b);
-                const dit_status_t status = dit_insert(&tree, a, b);
+                const dit_status_t status = dit_insert(&tree, a, b, OBJ(a));
 
                 if (insertable)
                 {
@@ -835,14 +1058,35 @@ test_random_against_model(void)
                 break ;
             }
 
-            /* remove */
+            /* remove, checking what the removal callback reports */
             case 1:
             {
-                const size_t expected = model_remove(&model, a, b);
-                const size_t got      = dit_remove(&tree, a, b);
+                collect_init(&c);
+
+                size_t expected = 0;
+                for (size_t i = 0 ; i < model.n ; ++i)
+                    if (a < model.intervals[i].b && model.intervals[i].a < b)
+                        ++expected;
+
+                const size_t got = dit_remove(&tree, a, b, collect_cb, &c);
+                model_remove(&model, a, b);
+
                 if (got != expected)
                     FAIL("remove([%" PRIu64 "..%" PRIu64 "[) removed %zu "
                          "intervals, expected %zu", a, b, got, expected);
+
+                /* the callback saw every removed interval, in increasing
+                 * order, each with the object it was inserted with */
+                if (c.n != got)
+                    FAIL("remove([%" PRIu64 "..%" PRIu64 "[) reported %zu of "
+                         "the %zu intervals it removed", a, b, c.n, got);
+                if (c.bad_objects)
+                    FAIL("remove([%" PRIu64 "..%" PRIu64 "[) reported %zu "
+                         "wrong objects", a, b, c.bad_objects);
+                for (size_t i = 1 ; i < c.n ; ++i)
+                    if (c.intervals[i - 1].a >= c.intervals[i].a)
+                        FAIL("remove([%" PRIu64 "..%" PRIu64 "[) reported "
+                             "intervals out of order at %zu", a, b, i);
                 break ;
             }
 
@@ -857,8 +1101,9 @@ test_random_against_model(void)
                     if (a < model.intervals[i].b && model.intervals[i].a < b)
                     {
                         if (expected >= c.n ||
-                            c.intervals[expected].a != model.intervals[i].a ||
-                            c.intervals[expected].b != model.intervals[i].b)
+                            c.intervals[expected].a   != model.intervals[i].a ||
+                            c.intervals[expected].b   != model.intervals[i].b ||
+                            c.intervals[expected].obj != model.intervals[i].obj)
                             FAIL("intersect([%" PRIu64 "..%" PRIu64 "[) "
                                  "mismatch at %zu", a, b, expected);
                         ++expected;
@@ -867,6 +1112,9 @@ test_random_against_model(void)
                 if (c.n != expected)
                     FAIL("intersect([%" PRIu64 "..%" PRIu64 "[) reported %zu "
                          "intervals, expected %zu", a, b, c.n, expected);
+                if (c.bad_objects)
+                    FAIL("intersect([%" PRIu64 "..%" PRIu64 "[) reported %zu "
+                         "wrong objects", a, b, c.bad_objects);
                 break ;
             }
         }
@@ -903,6 +1151,8 @@ test_random_large(void)
     dit_t tree;
     dit_init(&tree);
 
+    verify_t v;
+
     size_t inserted = 0;
     size_t removed  = 0;
 
@@ -912,8 +1162,8 @@ test_random_large(void)
         const dit_value_t b = a + 1 + rng_below(64);
 
         if (rng_below(4) == 0)
-            removed += dit_remove(&tree, a, b);
-        else if (dit_insert(&tree, a, b) == DIT_OK)
+            removed += dit_remove(&tree, a, b, NULL, NULL);
+        else if (dit_insert(&tree, a, b, OBJ(a)) == DIT_OK)
             ++inserted;
 
         if ((it % 5000) == 0)
@@ -921,6 +1171,14 @@ test_random_large(void)
             char err[512];
             if (dit_check(&tree, err, sizeof(err)))
                 FAIL("iteration %d: incoherent tree: %s", it, err);
+
+            /* `dit_check()` cannot know anything about opaque objects, so
+             * walk the tree and check them against the convention */
+            verify_init(&v);
+            dit_each(&tree, verify_cb, &v);
+            if (v.bad_objects)
+                FAIL("iteration %d: %zu of the %zu intervals carried a wrong "
+                     "object", it, v.bad_objects, v.n);
         }
     }
 
@@ -929,8 +1187,17 @@ test_random_large(void)
     ASSERT(inserted > 1000);
     ASSERT(removed > 1000);
 
-    /* removing everything must empty the tree */
-    dit_remove(&tree, 0, DIT_VALUE_MAX);
+    verify_init(&v);
+    dit_each(&tree, verify_cb, &v);
+    ASSERT_VERIFIED(&v);
+    ASSERT_EQ(v.n, dit_size(&tree));
+
+    /* removing everything must empty the tree, and hand every object back,
+     * in increasing order */
+    verify_init(&v);
+    const size_t all = dit_remove(&tree, 0, DIT_VALUE_MAX, verify_cb, &v);
+    ASSERT_VERIFIED(&v);
+    ASSERT_EQ(v.n, all);
     ASSERT(dit_empty(&tree));
     ASSERT_COHERENT(&tree);
 
@@ -965,7 +1232,7 @@ test_random_insert_then_remove(void)
 
     for (size_t i = 0 ; i < n ; ++i)
     {
-        if (dit_insert(&tree, 10 * order[i], 10 * order[i] + 7) != DIT_OK)
+        if (dit_insert(&tree, 10 * order[i], 10 * order[i] + 7, OBJ(10 * order[i])) != DIT_OK)
         {
             free(order);
             FAIL("insertion %zu failed", i);
@@ -998,7 +1265,7 @@ test_random_insert_then_remove(void)
 
     for (size_t i = 0 ; i < n ; ++i)
     {
-        if (dit_remove(&tree, 10 * order[i], 10 * order[i] + 7) != 1)
+        if (dit_remove(&tree, 10 * order[i], 10 * order[i] + 7, NULL, NULL) != 1)
         {
             free(order);
             FAIL("removal %zu failed", i);
@@ -1061,6 +1328,9 @@ main(int argc, char ** argv)
     RUN(test_extreme_values);
     RUN(test_check_detects_corruption);
     RUN(test_dump_dot);
+    RUN(test_objects);
+    RUN(test_objects_survive_deletions);
+    RUN(test_remove_callback);
     RUN(test_random_against_model);
     RUN(test_random_large);
     RUN(test_random_insert_then_remove);

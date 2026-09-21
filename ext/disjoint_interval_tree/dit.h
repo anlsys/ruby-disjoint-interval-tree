@@ -34,6 +34,12 @@
 **      insertion descent: `DIT_OVERLAP` is returned and the tree is left
 **      untouched.
 **
+**  Objects
+**      Every interval carries an opaque object, given at insertion and handed
+**      back by every query and traversal. The tree never owns it: it only
+**      stores the value, and never reads, copies nor releases whatever it
+**      points to. See `dit_remove()` to reclaim objects as intervals go away.
+**
 **  Complexities, with `n` intervals stored and `k` intervals reported
 **      dit_insert      O(log n)
 **      dit_intersect   O(k + log n)
@@ -64,6 +70,15 @@ extern "C" {
 # endif /* DIT_VALUE_T */
 
 typedef DIT_VALUE_T dit_value_t;
+
+/* Type of the object associated with each interval. It is opaque to the tree,
+ * which only ever stores and hands it back */
+# ifndef DIT_OBJECT_T
+#  define DIT_OBJECT_T      void *
+#  define DIT_OBJECT_NULL   ((dit_object_t) NULL)
+# endif /* DIT_OBJECT_T */
+
+typedef DIT_OBJECT_T dit_object_t;
 
 /* Internal consistency assertions. Those only ever fire on a dit bug, never on
  * a caller mistake - caller mistakes are reported through `dit_status_t`.
@@ -139,6 +154,10 @@ typedef struct  dit_node_s
     /* the interval [a..b[ represented by this node, with a < b */
     dit_value_t a, b;
 
+    /* the object associated with that interval, as given to `dit_insert()`.
+     * Opaque to the tree, which never dereferences nor releases it */
+    dit_object_t obj;
+
     /* children - `child[DIT_LEFT]` holds intervals entirely before `a`,
      * `child[DIT_RIGHT]` holds intervals entirely after `b` */
     union {
@@ -166,15 +185,18 @@ typedef struct  dit_s
 }               dit_t;
 
 /* Interval callback.
- * `[a..b[` is the stored interval, `user` the opaque pointer given to the
- * traversal. Return 0 to keep going, non-zero to stop the traversal early -
- * that value is then returned by the traversal routine */
-typedef int (*dit_cb_t)(dit_value_t a, dit_value_t b, void * user);
+ * `[a..b[` is the stored interval and `obj` its associated object, while
+ * `user` is the opaque pointer given to the traversal. Return 0 to keep going,
+ * non-zero to stop the traversal early - that value is then returned by the
+ * traversal routine */
+typedef int (*dit_cb_t)(dit_value_t a, dit_value_t b, dit_object_t obj, void * user);
 
 /* Initialize an empty tree. `dit_t` may also be zero-initialized */
 void dit_init(dit_t * tree);
 
-/* Free every node. The tree is left initialized and empty */
+/* Free every node. The tree is left initialized and empty.
+ * Objects are *not* released: walk the tree with `dit_each()` first if they
+ * need to be reclaimed */
 void dit_clear(dit_t * tree);
 
 /* Alias of `dit_clear()`, for symmetry with `dit_init()` */
@@ -194,11 +216,11 @@ int dit_height(const dit_t * tree);
  * untouched when the tree is empty. O(1) */
 int dit_hull(const dit_t * tree, dit_value_t * a, dit_value_t * b);
 
-/* Insert `[a..b[`.
+/* Insert `[a..b[`, associated with the object `obj`.
  * Returns DIT_OK, DIT_EMPTY if `a >= b`, DIT_OVERLAP if `[a..b[` intersects an
  * already inserted interval, DIT_NOMEM on allocation failure. The tree is left
  * unchanged unless DIT_OK is returned */
-dit_status_t dit_insert(dit_t * tree, dit_value_t a, dit_value_t b);
+dit_status_t dit_insert(dit_t * tree, dit_value_t a, dit_value_t b, dit_object_t obj);
 
 /* Return the stored interval intersecting `[a..b[`, or NULL if there is none.
  * If several intervals intersect `[a..b[`, which one is returned is
@@ -223,8 +245,13 @@ int dit_each(dit_t * tree, dit_cb_t cb, void * user);
 
 /* Remove every stored interval intersecting `[a..b[`. Returns how many
  * intervals were removed. Removed intervals are removed as a whole: an
- * interval merely overlapping `[a..b[` is *not* split */
-size_t dit_remove(dit_t * tree, dit_value_t a, dit_value_t b);
+ * interval merely overlapping `[a..b[` is *not* split.
+ *
+ * `cb`, when not NULL, is invoked on each interval just before its node is
+ * freed, so that its object can be reclaimed. It is called in increasing
+ * order, must not mutate the tree, and - unlike a traversal callback - its
+ * return value is ignored: a removal cannot be interrupted halfway */
+size_t dit_remove(dit_t * tree, dit_value_t a, dit_value_t b, dit_cb_t cb, void * user);
 
 /* Verify every structural invariant of the tree.
  * Returns 0 if the tree is coherent. Otherwise returns a non-zero value and,

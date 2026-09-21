@@ -27,13 +27,13 @@ class IntervalModel
   def intersect(a, b)
     return [] if a >= b
 
-    @intervals.select { |x, y| a < y && x < b }
+    @intervals.select { |x, y, _| a < y && x < b }
   end
 
-  def insert(a, b)
+  def insert(a, b, obj = nil)
     return false if a >= b || !intersect(a, b).empty?
 
-    @intervals << [a, b]
+    @intervals << [a, b, obj]
     @intervals.sort!
     true
   end
@@ -93,7 +93,7 @@ class TestDisjointIntervalTree < Minitest::Test
     refute_empty @tree
     assert_equal 1, @tree.size
     assert_equal 1, @tree.height
-    assert_equal [[10, 20]], @tree.to_a
+    assert_equal [[10, 20, nil]], @tree.to_a
     assert_equal [10, 20], @tree.hull
   end
 
@@ -101,8 +101,8 @@ class TestDisjointIntervalTree < Minitest::Test
     @tree.insert(10, 20)
 
     assert_nil @tree.at(9)
-    assert_equal [10, 20], @tree.at(10)
-    assert_equal [10, 20], @tree.at(19)
+    assert_equal [10, 20, nil], @tree.at(10)
+    assert_equal [10, 20, nil], @tree.at(19)
     assert_nil @tree.at(20)
 
     refute @tree.cover?(9)
@@ -117,14 +117,15 @@ class TestDisjointIntervalTree < Minitest::Test
     @tree.insert(20, 30)
 
     assert_equal 3, @tree.size
-    assert_equal [[0, 10], [10, 20], [20, 30]], @tree.to_a
+    assert_equal [[0, 10, nil], [10, 20, nil], [20, 30, nil]], @tree.to_a
     assert_equal [0, 30], @tree.hull
   end
 
   def test_intervals_are_ordered
     [50, 10, 90, 30, 70, 0, 20].each { |a| @tree.insert(a, a + 5) }
 
-    assert_equal [[0, 5], [10, 15], [20, 25], [30, 35], [50, 55], [70, 75], [90, 95]],
+    assert_equal [[0, 5, nil], [10, 15, nil], [20, 25, nil], [30, 35, nil],
+                  [50, 55, nil], [70, 75, nil], [90, 95, nil]],
                  @tree.to_a
     assert_equal @tree.to_a, @tree.to_a.sort
   end
@@ -165,7 +166,7 @@ class TestDisjointIntervalTree < Minitest::Test
     end
 
     # the tree was left untouched
-    assert_equal [[10, 20], [30, 40]], @tree.to_a
+    assert_equal [[10, 20, nil], [30, 40, nil]], @tree.to_a
   end
 
   def test_overlap_error_is_a_standard_error
@@ -182,7 +183,7 @@ class TestDisjointIntervalTree < Minitest::Test
     assert @tree.insert?(10, 20)
     refute @tree.insert?(15, 25)
     assert @tree.insert?(20, 25)
-    assert_equal [[10, 20], [20, 25]], @tree.to_a
+    assert_equal [[10, 20, nil], [20, 25, nil]], @tree.to_a
   end
 
   def test_insert_empty_interval_raises
@@ -223,8 +224,8 @@ class TestDisjointIntervalTree < Minitest::Test
   def test_large_bounds_are_supported
     @tree.insert(2**63, 2**63 + 10)
 
-    assert_equal [[2**63, 2**63 + 10]], @tree.to_a
-    assert_equal [2**63, 2**63 + 10], @tree.at(2**63 + 5)
+    assert_equal [[2**63, 2**63 + 10, nil]], @tree.to_a
+    assert_equal [2**63, 2**63 + 10, nil], @tree.at(2**63 + 5)
   end
 
   ##############
@@ -234,14 +235,14 @@ class TestDisjointIntervalTree < Minitest::Test
   def test_intersect_yields_matching_intervals
     tree = spaced_tree
     seen = []
-    result = tree.intersect(5, 45) { |a, b| seen << [a, b] }
+    result = tree.intersect(5, 45) { |a, b, obj| seen << [a, b, obj] }
 
     assert_same tree, result
-    assert_equal [[0, 10], [20, 30], [40, 50]], seen
+    assert_equal [[0, 10, nil], [20, 30, nil], [40, 50, nil]], seen
   end
 
   def test_intersect_without_block_returns_an_array
-    assert_equal [[0, 10], [20, 30], [40, 50]], spaced_tree.intersect(5, 45)
+    assert_equal [[0, 10, nil], [20, 30, nil], [40, 50, nil]], spaced_tree.intersect(5, 45)
   end
 
   def test_intersect_reports_nothing_when_querying_a_hole
@@ -252,8 +253,8 @@ class TestDisjointIntervalTree < Minitest::Test
     tree = spaced_tree
 
     assert_equal [], tree.intersect(10, 20)
-    assert_equal [[0, 10]], tree.intersect(9, 20)
-    assert_equal [[20, 30]], tree.intersect(10, 21)
+    assert_equal [[0, 10, nil]], tree.intersect(9, 20)
+    assert_equal [[20, 30, nil]], tree.intersect(10, 21)
   end
 
   def test_intersect_on_an_empty_query
@@ -347,7 +348,7 @@ class TestDisjointIntervalTree < Minitest::Test
 
     # reading is still fine
     assert_equal 4, tree.size
-    assert_equal [[0, 10]], tree.intersect(0, 10)
+    assert_equal [[0, 10, nil]], tree.intersect(0, 10)
     tree.check!
   end
 
@@ -371,7 +372,7 @@ class TestDisjointIntervalTree < Minitest::Test
     assert_equal 4, tree.size
 
     assert_equal 3, tree.remove(5, 45)
-    assert_equal [[60, 70]], tree.to_a
+    assert_equal [[60, 70, nil]], tree.to_a
   end
 
   def test_remove_does_not_split_intervals
@@ -380,7 +381,7 @@ class TestDisjointIntervalTree < Minitest::Test
     assert_equal 1, tree.remove(25, 26)
     assert_nil tree.at(20)
     assert_nil tree.at(29)
-    assert_equal [[0, 10], [40, 50], [60, 70]], tree.to_a
+    assert_equal [[0, 10, nil], [40, 50, nil], [60, 70, nil]], tree.to_a
   end
 
   def test_remove_ignores_adjacency
@@ -403,9 +404,9 @@ class TestDisjointIntervalTree < Minitest::Test
     tree = spaced_tree
     seen = []
 
-    assert_equal 3, tree.remove(5, 45) { |a, b| seen << [a, b] }
-    assert_equal [[0, 10], [20, 30], [40, 50]], seen
-    assert_equal [[60, 70]], tree.to_a
+    assert_equal 3, tree.remove(5, 45) { |a, b, obj| seen << [a, b, obj] }
+    assert_equal [[0, 10, nil], [20, 30, nil], [40, 50, nil]], seen
+    assert_equal [[60, 70, nil]], tree.to_a
   end
 
   def test_remove_then_reinsert
@@ -446,18 +447,18 @@ class TestDisjointIntervalTree < Minitest::Test
 
     assert_kind_of Enumerator, enumerator
     assert_equal 4, enumerator.size
-    assert_equal [[0, 10], [20, 30], [40, 50], [60, 70]], enumerator.to_a
+    assert_equal [[0, 10, nil], [20, 30, nil], [40, 50, nil], [60, 70, nil]], enumerator.to_a
   end
 
   def test_enumerable_methods
     tree = spaced_tree
 
     assert_equal [10, 10, 10, 10], tree.map { |a, b| b - a }
-    assert_equal [[0, 10]], tree.select { |a, _| a.zero? }
-    assert_equal [0, 10], tree.first
-    assert_equal [[0, 10], [20, 30]], tree.first(2)
-    assert tree.include?([20, 30])
-    refute tree.include?([20, 31])
+    assert_equal [[0, 10, nil]], tree.select { |a, _| a.zero? }
+    assert_equal [0, 10, nil], tree.first
+    assert_equal [[0, 10, nil], [20, 30, nil]], tree.first(2)
+    assert tree.include?([20, 30, nil])
+    refute tree.include?([20, 31, nil])
     assert_equal 4, tree.count
     assert_equal 40, tree.sum { |a, b| b - a }
   end
@@ -473,7 +474,7 @@ class TestDisjointIntervalTree < Minitest::Test
   def test_new_with_intervals
     tree = DisjointIntervalTree.new([[20, 30], [0, 10]])
 
-    assert_equal [[0, 10], [20, 30]], tree.to_a
+    assert_equal [[0, 10, nil], [20, 30, nil]], tree.to_a
   end
 
   def test_new_with_overlapping_intervals_raises
@@ -484,7 +485,7 @@ class TestDisjointIntervalTree < Minitest::Test
 
   def test_new_with_garbage_raises
     assert_raises(TypeError)     { DisjointIntervalTree.new(42) }
-    assert_raises(ArgumentError) { DisjointIntervalTree.new([[0, 10, 20]]) }
+    assert_raises(ArgumentError) { DisjointIntervalTree.new([[0, 10, nil, 20]]) }
     assert_raises(ArgumentError) { DisjointIntervalTree.new([0]) }
   end
 
@@ -508,7 +509,7 @@ class TestDisjointIntervalTree < Minitest::Test
     assert_equal DisjointIntervalTree.new, DisjointIntervalTree.new
     assert_equal spaced_tree, spaced_tree
     refute_equal spaced_tree, DisjointIntervalTree.new
-    refute_equal spaced_tree, [[0, 10], [20, 30], [40, 50], [60, 70]]
+    refute_equal spaced_tree, [[0, 10, nil], [20, 30, nil], [40, 50, nil], [60, 70, nil]]
   end
 
   ##################
@@ -523,7 +524,7 @@ class TestDisjointIntervalTree < Minitest::Test
     @tree.insert(1, max - 1)
 
     assert_equal [0, max], @tree.hull
-    assert_equal [max - 1, max], @tree.at(max - 1)
+    assert_equal [max - 1, max, nil], @tree.at(max - 1)
 
     # no half-open interval can ever contain MAX
     assert_nil @tree.at(max)
@@ -586,8 +587,10 @@ class TestDisjointIntervalTree < Minitest::Test
       case rand(3)
       when 0
         if model.intersect(a, b).empty?
-          @tree.insert(a, b)
-          model.insert(a, b)
+          # an object whose content identifies the interval it belongs to, so
+          # that a payload moved to the wrong node is caught by the comparison
+          @tree.insert(a, b, "obj-#{a}")
+          model.insert(a, b, "obj-#{a}")
         else
           assert_raises(DisjointIntervalTree::OverlapError) { @tree.insert(a, b) }
         end
@@ -644,6 +647,192 @@ class TestDisjointIntervalTree < Minitest::Test
     GC.compact if GC.respond_to?(:compact)
 
     @tree.insert(0, 10)
-    assert_equal [[0, 10]], @tree.to_a
+    assert_equal [[0, 10, nil]], @tree.to_a
+  end
+
+  ###########
+  # OBJECTS #
+  ###########
+
+  def test_objects_are_optional
+    @tree.insert(0, 10)
+    @tree.insert(20, 30, :something)
+
+    assert_equal [[0, 10, nil], [20, 30, :something]], @tree.to_a
+    assert_nil @tree[5]
+    assert_equal :something, @tree[25]
+  end
+
+  def test_objects_are_returned_by_identity
+    payload = Object.new
+    @tree.insert(0, 10, payload)
+
+    assert_same payload, @tree[5]
+    assert_same payload, @tree.at(5)[2]
+    assert_same payload, @tree.to_a.first[2]
+    assert_same payload, @tree.intersect(0, 100).first[2]
+
+    @tree.intersect(0, 100) { |_a, _b, obj| assert_same payload, obj }
+    @tree.each { |_a, _b, obj| assert_same payload, obj }
+    @tree.remove(0, 100) { |_a, _b, obj| assert_same payload, obj }
+  end
+
+  def test_any_object_can_be_stored
+    objects = [nil, false, true, 42, :sym, 'str', [1, 2], { a: 1 }, Object.new, 2**80]
+
+    objects.each_with_index { |obj, i| @tree.insert(10 * i, 10 * i + 5, obj) }
+    @tree.check!
+
+    objects.each_with_index do |obj, i|
+      assert_same obj, @tree[10 * i], "object #{obj.inspect}"
+    end
+  end
+
+  def test_several_intervals_may_share_an_object
+    shared = 'shared'
+    @tree.insert(0, 10, shared)
+    @tree.insert(20, 30, shared)
+
+    assert_same shared, @tree[5]
+    assert_same shared, @tree[25]
+
+    # removing one leaves the other untouched
+    @tree.remove(0, 10)
+    assert_same shared, @tree[25]
+  end
+
+  def test_aref_cannot_tell_a_nil_object_from_a_missing_interval
+    @tree.insert(0, 10, nil)
+
+    assert_nil @tree[5]
+    assert_nil @tree[15]
+
+    # ... but #at and #cover? can
+    assert_equal [0, 10, nil], @tree.at(5)
+    assert @tree.cover?(5)
+    assert_nil @tree.at(15)
+    refute @tree.cover?(15)
+  end
+
+  def test_objects_follow_their_interval_through_rebalancing
+    n = 512
+
+    # insert in an order that forces rotations, then delete in an order that
+    # forces two-children deletions -- the case that moves an interval from
+    # one node to another, and where its object could be left behind
+    (0...n).to_a.shuffle.each { |i| @tree.insert(10 * i, 10 * i + 5, "obj-#{i}") }
+    @tree.check!
+
+    @tree.each { |a, _b, obj| assert_equal "obj-#{a / 10}", obj }
+
+    (0...n).to_a.shuffle.each do |i|
+      assert_equal 1, @tree.remove(10 * i, 10 * i + 5) { |a, _b, obj|
+        assert_equal "obj-#{a / 10}", obj
+      }
+      @tree.each { |a, _b, obj| assert_equal "obj-#{a / 10}", obj }
+    end
+
+    assert_empty @tree
+  end
+
+  def test_dup_shares_the_objects
+    payload = Object.new
+    @tree.insert(0, 10, payload)
+
+    copy = @tree.dup
+
+    assert_equal @tree, copy
+    assert_same payload, copy[5]
+    assert_same @tree[5], copy[5]
+  end
+
+  def test_equality_compares_objects
+    one = DisjointIntervalTree.new([[0, 10, :a]])
+    two = DisjointIntervalTree.new([[0, 10, :a]])
+    three = DisjointIntervalTree.new([[0, 10, :b]])
+
+    assert_equal one, two
+    refute_equal one, three
+  end
+
+  def test_an_object_only_referenced_by_the_tree_survives_gc
+    @tree.insert(0, 10, +'only-the-tree-holds-me')
+    @tree.insert(20, 30, Object.new)
+
+    GC.start
+    GC.start
+
+    assert_equal 'only-the-tree-holds-me', @tree[5]
+    refute_nil @tree[25]
+    @tree.check!
+  end
+
+  # A finalizer must be built outside the scope holding the object it watches:
+  # its binding is kept alive by the ObjectSpace finalizer table, so a
+  # finalizer defined next to the object would keep that object reachable and
+  # the test would measure nothing.
+  def counting_finalizer(counter)
+    ->(_id) { counter[0] += 1 }
+  end
+
+  def fill_with_finalized_objects(tree, finalizer, n)
+    n.times do |i|
+      obj = Object.new
+      ObjectSpace.define_finalizer(obj, finalizer)
+      tree.insert(10 * i, 10 * i + 5, obj)
+    end
+  end
+
+  def test_objects_are_collectable_once_removed
+    counter = [0]
+    fill_with_finalized_objects(@tree, counting_finalizer(counter), 10)
+
+    GC.start
+    GC.start
+    assert_equal 0, counter[0], 'objects held by the tree must not be collected'
+
+    @tree.clear
+    GC.start
+    GC.start
+
+    assert_operator counter[0], :>, 0,
+                    'objects must become collectable once the tree drops them'
+  end
+
+  def test_objects_are_collectable_once_their_interval_is_removed
+    counter = [0]
+    fill_with_finalized_objects(@tree, counting_finalizer(counter), 10)
+
+    GC.start
+    assert_equal 0, counter[0]
+
+    assert_equal 4, @tree.remove(0, 35)
+    GC.start
+    GC.start
+
+    assert_operator counter[0], :>, 0
+    assert_equal 6, @tree.size
+    @tree.check!
+  end
+
+  def test_objects_survive_compaction
+    skip 'GC.compact is not available' unless GC.respond_to?(:compact)
+
+    100.times { |i| @tree.insert(10 * i, 10 * i + 5, +"obj-#{i}") }
+
+    GC.compact
+
+    100.times { |i| assert_equal "obj-#{i}", @tree[10 * i] }
+    @tree.check!
+  end
+
+  def test_objects_under_gc_stress
+    GC.stress = true
+
+    20.times { |i| @tree.insert(10 * i, 10 * i + 5, +"obj-#{i}") }
+    assert_equal 20, @tree.intersect(0, 1000).size
+    @tree.each { |a, _b, obj| assert_equal "obj-#{a / 10}", obj }
+  ensure
+    GC.stress = false
   end
 end

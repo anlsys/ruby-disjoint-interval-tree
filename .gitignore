@@ -5,6 +5,7 @@
 *.gem
 *.o
 *.so
+/lib/disjoint_interval_tree/.build-id
 *.bundle
 
 # `ruby extconf.rb` run in place, rather than through rake, leaves these
